@@ -10,6 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { authenticate } from './src/server/auth';
 import { createApiRouter } from './src/server/api';
+import { createMcpRouter } from './src/server/mcp/router';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,7 +25,21 @@ export async function createServerApp() {
     getStorage();
   }
 
-  // Raw body capture for webhook signature verification
+  // Scoped MCP endpoint: 2MB body limit, cookie parsing, and authentication
+  app.use(
+    '/mcp',
+    express.json({
+      limit: '2mb',
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+    cookieParser(),
+    authenticate,
+    createMcpRouter()
+  );
+
+  // Raw body capture for webhook signature verification on standard API routes
   app.use(
     express.json({
       verify: (req: any, _res, buf) => {
