@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AIDisCost | AI Cost Optimization &amp; Verification</title>
+    <meta name="description" content="AI Cost Optimization &amp; Verification Platform. Find unnecessary AI spend, prove with evidence, and verify post-deployment results." />
+    <meta property="og:title" content="AIDisCost | AI Cost Optimization &amp; Verification" />
+    <meta property="og:description" content="AI Cost Optimization &amp; Verification Platform. Find unnecessary AI spend, prove with evidence, and verify post-deployment results." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Runtime Stability Guard:
+      // In modern browsers, window.fetch is an accessor property (getter only) on Window.prototype.
+      // If external tooling, dev harnesses, or dependencies attempt to assign `window.fetch = ...`,
+      // strict mode runtimes throw "TypeError: Cannot set property fetch of #<Window> which has only a getter".
+      // We safely configure a setter that updates the active fetch reference while preserving native fetch behavior.
+      (function() {
+        try {
+          var desc = Object.getOwnPropertyDescriptor(window, 'fetch') || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(window) || {}, 'fetch');
+          if (desc && desc.get && !desc.set) {
+            var _activeFetch = window.fetch.bind(window);
+            Object.defineProperty(window, 'fetch', {
+              get: function() { return _activeFetch; },
+              set: function(fn) { _activeFetch = fn; },
+              configurable: true,
+              enumerable: true
+            });
+          }
+        } catch (e) {
+          // Non-blocking in locked/sealed environments
+        }
+      })();
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-slate-50 text-slate-900 antialiased font-sans">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
