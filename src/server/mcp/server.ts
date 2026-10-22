@@ -137,22 +137,55 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           ingestPipelineResult.ingestResult.is_sample_data
         );
 
-        // 4. If authenticated, register finding ownerships
+        // 4. If authenticated, register and verify finding ownerships
         let ownershipConfirmed = false;
         let ownershipWarning: string | undefined;
+        let confirmedCount = 0;
+        let conflictCount = 0;
+        let failedCount = 0;
+        const verifiedOwnerFindingIds = new Set<string>();
 
         if (user && auditSummary.findings.length > 0) {
           try {
             for (const finding of auditSummary.findings) {
-              const currentOwner = await storage.getFindingOwner(finding.id);
-              if (!currentOwner) {
-                await storage.registerFindingOwnership(finding.id, user.id);
-              } else if (currentOwner !== user.id) {
-                // Do not overwrite ownership if already owned by another user
-                ownershipWarning = 'Some findings are already owned by another account and were not re-assigned.';
+              try {
+                const currentOwner = await storage.getFindingOwner(finding.id);
+                if (!currentOwner) {
+                  await storage.registerFindingOwnership(finding.id, user.id);
+                } else if (currentOwner !== user.id) {
+                  // Do not overwrite ownership or disclose other user's identity
+                  conflictCount++;
+                  continue;
+                }
+
+                // Explicitly read back stored owner to verify persistence
+                const verifiedOwner = await storage.getFindingOwner(finding.id);
+                if (verifiedOwner === user.id) {
+                  confirmedCount++;
+                  verifiedOwnerFindingIds.add(finding.id);
+                } else {
+                  failedCount++;
+                }
+              } catch {
+                failedCount++;
               }
             }
-            ownershipConfirmed = true;
+
+            const totalFindings = auditSummary.findings.length;
+            if (conflictCount > 0 && confirmedCount > 0) {
+              ownershipConfirmed = false;
+              ownershipWarning = `Partial ownership: ${confirmedCount} of ${totalFindings} findings registered to your account. ${conflictCount} findings are already owned by another account.`;
+            } else if (conflictCount > 0 && confirmedCount === 0) {
+              ownershipConfirmed = false;
+              ownershipWarning = 'All findings from this audit are already owned by another account and were not re-assigned.';
+            } else if (failedCount > 0) {
+              ownershipConfirmed = false;
+              ownershipWarning = `Ownership verification failed for ${failedCount} of ${totalFindings} findings.`;
+            } else if (confirmedCount === totalFindings && totalFindings > 0) {
+              ownershipConfirmed = true;
+            } else {
+              ownershipConfirmed = false;
+            }
           } catch {
             ownershipConfirmed = false;
             ownershipWarning = 'Failed to persist finding ownership records to database.';
@@ -191,11 +224,20 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
             eligible_event_count: f.eligible_event_count,
             fix_package_price_usd: 49.0,
             is_unlocked: false,
+            is_owned_by_requesting_user: user ? verifiedOwnerFindingIds.has(f.id) : false,
           })),
           ownership: user
             ? {
-                registered_to_user_id: user.id,
+                registered_to_user_id: ownershipConfirmed
+                  ? user.id
+                  : auditSummary.findings.length === 0
+                  ? user.id
+                  : null,
                 ownership_confirmed: ownershipConfirmed,
+                total_findings: auditSummary.findings.length,
+                confirmed_findings_count: confirmedCount,
+                conflict_findings_count: conflictCount,
+                failed_findings_count: failedCount,
                 warning: ownershipWarning,
               }
             : {
