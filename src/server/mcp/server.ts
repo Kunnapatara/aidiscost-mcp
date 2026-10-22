@@ -172,19 +172,27 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
             }
 
             const totalFindings = auditSummary.findings.length;
-            if (conflictCount > 0 && confirmedCount > 0) {
-              ownershipConfirmed = false;
-              ownershipWarning = `Partial ownership: ${confirmedCount} of ${totalFindings} findings registered to your account. ${conflictCount} findings are already owned by another account.`;
-            } else if (conflictCount > 0 && confirmedCount === 0) {
-              ownershipConfirmed = false;
-              ownershipWarning = 'All findings from this audit are already owned by another account and were not re-assigned.';
-            } else if (failedCount > 0) {
-              ownershipConfirmed = false;
-              ownershipWarning = `Ownership verification failed for ${failedCount} of ${totalFindings} findings.`;
-            } else if (confirmedCount === totalFindings && totalFindings > 0) {
+            if (confirmedCount === totalFindings && totalFindings > 0) {
               ownershipConfirmed = true;
+              ownershipWarning = undefined;
             } else {
               ownershipConfirmed = false;
+
+              // Compose accurate warning message detailing all observed outcomes
+              if (conflictCount === totalFindings) {
+                ownershipWarning = 'All findings from this audit are already owned by another account and were not re-assigned.';
+              } else if (failedCount === totalFindings) {
+                ownershipWarning = `Ownership verification failed for ${failedCount} of ${totalFindings} findings.`;
+              } else if (conflictCount > 0 && failedCount > 0) {
+                const prefix = confirmedCount > 0 ? `${confirmedCount} registered to your account, ` : '';
+                ownershipWarning = `Partial ownership outcome: ${prefix}${conflictCount} already owned by another account, ownership verification failed for ${failedCount} finding${failedCount > 1 ? 's' : ''}.`;
+              } else if (conflictCount > 0 && confirmedCount > 0) {
+                ownershipWarning = `Partial ownership: ${confirmedCount} of ${totalFindings} findings registered to your account. ${conflictCount} findings are already owned by another account.`;
+              } else if (failedCount > 0) {
+                ownershipWarning = `Ownership verification failed for ${failedCount} of ${totalFindings} findings.`;
+              } else {
+                ownershipWarning = 'Failed to verify finding ownership records.';
+              }
             }
           } catch {
             ownershipConfirmed = false;
@@ -228,11 +236,8 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           })),
           ownership: user
             ? {
-                registered_to_user_id: ownershipConfirmed
-                  ? user.id
-                  : auditSummary.findings.length === 0
-                  ? user.id
-                  : null,
+                registered_to_user_id: ownershipConfirmed ? user.id : null,
+                requesting_user_id: user.id,
                 ownership_confirmed: ownershipConfirmed,
                 total_findings: auditSummary.findings.length,
                 confirmed_findings_count: confirmedCount,

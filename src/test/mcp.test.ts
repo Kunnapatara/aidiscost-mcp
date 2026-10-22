@@ -219,7 +219,8 @@ describe('AIDisCost — MCP Protocol & Finding Ownership Suite', () => {
       const parsedAudit = JSON.parse(data.result.content[0].text);
       assert.ok(parsedAudit.audit_id);
       assert.ok(parsedAudit.data_health);
-      assert.strictEqual(parsedAudit.ownership?.registered_to_user_id, userA.id);
+      assert.strictEqual(parsedAudit.ownership?.registered_to_user_id, null);
+      assert.strictEqual(parsedAudit.ownership?.requesting_user_id, userA.id);
       assert.strictEqual(parsedAudit.ownership?.ownership_confirmed, false);
       assert.strictEqual(parsedAudit.findings_count, 0);
     });
@@ -228,6 +229,9 @@ describe('AIDisCost — MCP Protocol & Finding Ownership Suite', () => {
   describe('2. Finding Ownership Safety & Verification (Scenarios A - F)', () => {
     // Scenario A: New Finding ownership
     test('Scenario A: User A runs an audit producing new findings -> registered and verified to User A', async () => {
+      // Ensure pristine state for right-sizing finding in real storage
+      delete (storage as any).data.findingOwnerships['fnd_right_sizing_gpt-4o_gpt-4o-mini'];
+
       const callPayload = {
         jsonrpc: '2.0',
         id: 101,
@@ -256,6 +260,7 @@ describe('AIDisCost — MCP Protocol & Finding Ownership Suite', () => {
 
       assert.ok(parsed.findings_count >= 1, 'Should produce at least 1 finding');
       const findingId = parsed.findings[0].id;
+      assert.strictEqual(findingId, 'fnd_right_sizing_gpt-4o_gpt-4o-mini');
 
       // Verify read-back from storage matches User A
       const storedOwner = await storage.getFindingOwner(findingId);
@@ -264,41 +269,28 @@ describe('AIDisCost — MCP Protocol & Finding Ownership Suite', () => {
       // Verify response reports ownership confirmation accurately
       assert.strictEqual(parsed.ownership?.ownership_confirmed, true);
       assert.strictEqual(parsed.ownership?.registered_to_user_id, userA.id);
+      assert.strictEqual(parsed.ownership?.requesting_user_id, userA.id);
       assert.strictEqual(parsed.ownership?.confirmed_findings_count, parsed.findings_count);
       assert.strictEqual(parsed.ownership?.conflict_findings_count, 0);
       assert.strictEqual(parsed.ownership?.warning, undefined);
       assert.strictEqual(parsed.findings[0].is_owned_by_requesting_user, true);
     });
 
-    // Scenario B: Finding already owned by another user
-    test('Scenario B: Finding owned by User B -> User A audit does not transfer, claim ownership, or leak User B identity', async () => {
-      // 1. Explicitly pre-register a finding to User B
-      const foreignFindingId = 'fnd_foreign_model_test_b';
-      await storage.registerFindingOwnership(foreignFindingId, userB.id);
+    // Scenario B: Finding already owned by another user (Exact same ID in real storage)
+    test('Scenario B: Finding owned by User B (same-ID on real storage) -> User A audit does not transfer, claim ownership, or leak User B identity', async () => {
+      // 1. Explicitly pre-register the exact finding ID produced by the audit to User B in real storage
+      const exactFindingId = 'fnd_right_sizing_gpt-4o_gpt-4o-mini';
+      (storage as any).data.findingOwnerships[exactFindingId] = {
+        finding_id: exactFindingId,
+        owner_id: userB.id,
+        created_at: new Date().toISOString(),
+      };
 
-      // Verify User B is the stored owner
-      const initialOwner = await storage.getFindingOwner(foreignFindingId);
-      assert.strictEqual(initialOwner, userB.id);
+      // Verify User B is the stored owner in real storage
+      const initialOwner = await storage.getFindingOwner(exactFindingId);
+      assert.strictEqual(initialOwner, userB.id, 'Stored owner must initially be User B');
 
-      // 2. Build a custom server where finding ID collision is encountered
-      // We test via McpServer directly with a custom storage containing foreign finding
-      const customStorage: IStorage = Object.assign(Object.create(storage), {
-        async getFindingOwner(id: string) {
-          if (id.startsWith('fnd_right_sizing_')) {
-            return userB.id; // Owned by User B!
-          }
-          return storage.getFindingOwner(id);
-        },
-        async registerFindingOwnership(id: string, ownerId: string) {
-          if (id.startsWith('fnd_right_sizing_')) {
-            // Storage invariant: do not overwrite
-            return { finding_id: id, owner_id: userB.id, created_at: new Date().toISOString() };
-          }
-          return storage.registerFindingOwnership(id, ownerId);
-        },
-      });
-
-      const mcpUserA = createMcpServer(userA, customStorage);
+      // 2. User A executes audit generating that exact finding ID over real HTTP /mcp endpoint
       const callPayload = {
         jsonrpc: '2.0',
         id: 102,
@@ -311,9 +303,84 @@ describe('AIDisCost — MCP Protocol & Finding Ownership Suite', () => {
         },
       };
 
-      // Call tool via HTTP endpoint mounted with customStorage
-      const appB = express();
-      appB.use(
+      const res = await fetch(`${serverUrl}/mcp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          Authorization: 'Bearer token-user-a',
+        },
+        body: JSON.stringify(callPayload),
+      });
+
+      assert.strictEqual(res.status, 200);
+      const rawText = await res.text();
+      const data = JSON.parse(rawText);
+      const parsed = JSON.parse(data.result.content[0].text);
+
+      // Confirm the finding was the exact ID tested
+      assert.strictEqual(parsed.findings[0].id, exactFindingId);
+
+      // Verify ownership was NOT transferred or claimed
+      assert.strictEqual(parsed.ownership?.ownership_confirmed, false, 'ownership_confirmed must be false');
+      assert.strictEqual(parsed.ownership?.registered_to_user_id, null, 'registered_to_user_id must be null');
+      assert.strictEqual(parsed.ownership?.requesting_user_id, userA.id);
+      assert.strictEqual(parsed.ownership?.conflict_findings_count, 1);
+      assert.strictEqual(parsed.ownership?.confirmed_findings_count, 0);
+      assert.strictEqual(parsed.findings[0].is_owned_by_requesting_user, false);
+      assert.ok(parsed.ownership?.warning, 'Warning message must be present');
+      assert.ok(parsed.ownership?.warning.includes('already owned by another account'));
+
+      // Non-disclosure verification: User B's identity must NOT appear anywhere in the response text
+      assert.ok(!rawText.includes(userB.id), 'Must not leak User B ID');
+      assert.ok(!rawText.includes(userB.email), 'Must not leak User B email');
+
+      // Confirm stored owner in real storage remained User B
+      const finalOwner = await storage.getFindingOwner(exactFindingId);
+      assert.strictEqual(finalOwner, userB.id, 'Stored owner must remain User B in real storage');
+    });
+
+    // Scenario B.2: Concurrent registration attempts against existing owner in real storage
+    test('Scenario B.2: Concurrent registration attempts against existing foreign owner in real storage never overwrite', async () => {
+      const targetFindingId = 'fnd_concurrent_race_test';
+      await storage.registerFindingOwnership(targetFindingId, userB.id);
+
+      // Launch multiple concurrent attempts to claim ownership by User A and User C
+      const results = await Promise.all([
+        storage.registerFindingOwnership(targetFindingId, userA.id),
+        storage.registerFindingOwnership(targetFindingId, 'usr_mcp_test_c'),
+        storage.registerFindingOwnership(targetFindingId, userA.id),
+      ]);
+
+      // All returned records must reflect User B as the immutable owner
+      for (const record of results) {
+        assert.strictEqual(record.owner_id, userB.id);
+      }
+
+      const persistentOwner = await storage.getFindingOwner(targetFindingId);
+      assert.strictEqual(persistentOwner, userB.id, 'Stored owner must remain User B under concurrent race');
+    });
+
+    // Scenario B.3: Coexisting foreign conflict and storage failure
+    test('Scenario B.3: Coexisting foreign conflict and verification failure reports accurate multi-outcome warning without false claims', async () => {
+      // Storage where right-sizing is foreign-owned by User B, and retry-loop fails registration
+      const customStorage: IStorage = Object.assign(Object.create(storage), {
+        async getFindingOwner(id: string) {
+          if (id.startsWith('fnd_right_sizing_')) {
+            return userB.id; // foreign-owned
+          }
+          return null;
+        },
+        async registerFindingOwnership(id: string) {
+          if (id.startsWith('fnd_retry_loop_')) {
+            throw new Error('STORAGE_DISK_FULL');
+          }
+          return { finding_id: id, owner_id: userA.id, created_at: new Date().toISOString() };
+        },
+      });
+
+      const appMulti = express();
+      appMulti.use(
         '/mcp',
         express.json({ limit: '2mb' }),
         cookieParser(),
@@ -324,41 +391,44 @@ describe('AIDisCost — MCP Protocol & Finding Ownership Suite', () => {
         createMcpRouter(customStorage)
       );
 
-      const serverB = appB.listen(0, '127.0.0.1');
-      await new Promise<void>((r) => serverB.on('listening', r));
-      const urlB = `http://127.0.0.1:${(serverB.address() as any).port}`;
+      const serverMulti = appMulti.listen(0, '127.0.0.1');
+      await new Promise<void>((r) => serverMulti.on('listening', r));
+      const urlMulti = `http://127.0.0.1:${(serverMulti.address() as any).port}`;
 
       try {
-        const res = await fetch(`${urlB}/mcp`, {
+        const res = await fetch(`${urlMulti}/mcp`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Accept: 'application/json, text/event-stream',
           },
-          body: JSON.stringify(callPayload),
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1033,
+            method: 'tools/call',
+            params: {
+              name: 'run_cost_audit',
+              arguments: {
+                telemetry_data: twoFindingsTelemetryJson,
+              },
+            },
+          }),
         });
 
         assert.strictEqual(res.status, 200);
-        const rawText = await res.text();
-        const data = JSON.parse(rawText);
+        const data = (await res.json()) as any;
         const parsed = JSON.parse(data.result.content[0].text);
 
-        // Verify ownership was NOT transferred or claimed
-        assert.strictEqual(parsed.ownership?.ownership_confirmed, false, 'ownership_confirmed must be false');
-        assert.strictEqual(parsed.ownership?.registered_to_user_id, null, 'registered_to_user_id must be null');
-        assert.ok(parsed.ownership?.conflict_findings_count >= 1, 'Conflict count must be >= 1');
-        assert.ok(parsed.ownership?.warning, 'Warning message must be present');
+        assert.strictEqual(parsed.ownership?.ownership_confirmed, false);
+        assert.strictEqual(parsed.ownership?.registered_to_user_id, null);
+        assert.strictEqual(parsed.ownership?.conflict_findings_count, 1);
+        assert.strictEqual(parsed.ownership?.failed_findings_count, 1);
+        // Warning must accurately mention BOTH the foreign conflict and the verification failure, NOT claim all were foreign-owned
         assert.ok(parsed.ownership?.warning.includes('already owned by another account'));
-
-        // Non-disclosure verification: User B's identity must NOT appear anywhere in the response text
-        assert.ok(!rawText.includes(userB.id), 'Must not leak User B ID');
-        assert.ok(!rawText.includes(userB.email), 'Must not leak User B email');
-
-        // Confirm stored owner remained User B
-        const finalOwner = await customStorage.getFindingOwner('fnd_right_sizing_gpt-4o_gpt-4o-mini');
-        assert.strictEqual(finalOwner, userB.id, 'Stored owner must remain User B');
+        assert.ok(parsed.ownership?.warning.includes('ownership verification failed'));
+        assert.ok(!parsed.ownership?.warning.includes('All findings from this audit are already owned'));
       } finally {
-        await new Promise<void>((r) => serverB.close(() => r()));
+        await new Promise<void>((r) => serverMulti.close(() => r()));
       }
     });
 
