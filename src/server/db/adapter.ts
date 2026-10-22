@@ -204,6 +204,15 @@ export class DrizzleStorageAdapter implements IStorage {
 
   // --- Entitlement Operations ---
   async createEntitlement(entitlement: Entitlement): Promise<Entitlement> {
+    const existing = await this.getEntitlement(entitlement.user_id, entitlement.finding_id);
+    if (
+      existing &&
+      existing.status === 'REVOKED' &&
+      existing.provider_transaction_id === entitlement.provider_transaction_id
+    ) {
+      return existing; // Monotonic invariant
+    }
+
     await this.db
       .insert(schema.entitlements)
       .values({
@@ -228,6 +237,26 @@ export class DrizzleStorageAdapter implements IStorage {
           updatedAt: entitlement.updated_at,
         },
       });
+
+    return entitlement;
+  }
+
+  async updateEntitlement(entitlement: Entitlement): Promise<Entitlement> {
+    await this.db
+      .update(schema.entitlements)
+      .set({
+        status: entitlement.status,
+        provider: entitlement.provider,
+        providerTransactionId: entitlement.provider_transaction_id,
+        amountUsd: entitlement.amount_usd,
+        updatedAt: entitlement.updated_at,
+      })
+      .where(
+        and(
+          eq(schema.entitlements.userId, entitlement.user_id),
+          eq(schema.entitlements.findingId, entitlement.finding_id)
+        )
+      );
 
     return entitlement;
   }
@@ -564,6 +593,28 @@ export class DrizzleStorageAdapter implements IStorage {
           processedAt: params.event.processed_at,
         });
 
+        const existingEntitlementRows = await tx
+          .select()
+          .from(schema.entitlements)
+          .where(
+            and(
+              eq(schema.entitlements.userId, params.entitlement.user_id),
+              eq(schema.entitlements.findingId, params.entitlement.finding_id)
+            )
+          )
+          .limit(1);
+
+        if (
+          existingEntitlementRows[0] &&
+          existingEntitlementRows[0].status === 'REVOKED' &&
+          existingEntitlementRows[0].providerTransactionId === params.entitlement.provider_transaction_id
+        ) {
+          // Monotonic guard: delayed order_created must not reactivate an already revoked entitlement
+          this.processedWebhooksCache.add(params.event.event_id);
+          this.inFlightWebhooks.delete(params.event.event_id);
+          return { status: 'SUCCESS' };
+        }
+
         await tx
           .insert(schema.entitlements)
           .values({
@@ -626,6 +677,143 @@ export class DrizzleStorageAdapter implements IStorage {
 
       // If the event was NOT committed in the database, this is NOT a duplicate.
       // Cache must NOT be poisoned with uncommitted events.
+      this.processedWebhooksCache.delete(params.event.event_id);
+      throw err;
+    }
+  }
+
+  // --- Atomic Commercial Refund Webhook Transaction ---
+  async processOrderRefundedWebhookTransaction(params: {
+    event: ProcessedWebhookEvent;
+    userId: string;
+    findingId: string;
+    orderId: string;
+  }): Promise<{ status: 'SUCCESS' | 'DUPLICATE' | 'NOT_FOUND' | 'MISMATCH'; entitlement?: Entitlement }> {
+    if (this.processedWebhooksCache.has(params.event.event_id)) {
+      this.inFlightWebhooks.delete(params.event.event_id);
+      return { status: 'DUPLICATE' };
+    }
+
+    try {
+      return await this.db.transaction(async (tx) => {
+        const existingEvent = await tx
+          .select({ eventId: schema.webhookEvents.eventId })
+          .from(schema.webhookEvents)
+          .where(eq(schema.webhookEvents.eventId, params.event.event_id))
+          .limit(1);
+
+        if (existingEvent[0]) {
+          this.processedWebhooksCache.add(params.event.event_id);
+          this.inFlightWebhooks.delete(params.event.event_id);
+          return { status: 'DUPLICATE' };
+        }
+
+        const existingEntitlementRows = await tx
+          .select()
+          .from(schema.entitlements)
+          .where(
+            and(
+              eq(schema.entitlements.userId, params.userId),
+              eq(schema.entitlements.findingId, params.findingId)
+            )
+          )
+          .limit(1);
+
+        if (!existingEntitlementRows[0]) {
+          this.inFlightWebhooks.delete(params.event.event_id);
+          return { status: 'NOT_FOUND' };
+        }
+
+        const existing = existingEntitlementRows[0];
+        if (existing.providerTransactionId && existing.providerTransactionId !== params.orderId) {
+          this.inFlightWebhooks.delete(params.event.event_id);
+          return {
+            status: 'MISMATCH',
+            entitlement: {
+              id: existing.id,
+              user_id: existing.userId,
+              finding_id: existing.findingId,
+              type: existing.type as any,
+              status: existing.status as any,
+              provider: existing.provider as any,
+              provider_transaction_id: existing.providerTransactionId,
+              amount_usd: existing.amountUsd,
+              created_at: existing.createdAt,
+              updated_at: existing.updatedAt,
+            },
+          };
+        }
+
+        await tx.insert(schema.webhookEvents).values({
+          eventId: params.event.event_id,
+          provider: params.event.provider,
+          eventName: params.event.event_name,
+          userId: params.event.user_id,
+          findingId: params.event.finding_id,
+          orderId: params.event.order_id,
+          processedAt: params.event.processed_at,
+        });
+
+        const now = new Date().toISOString();
+        await tx
+          .update(schema.entitlements)
+          .set({
+            status: 'REVOKED',
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.entitlements.userId, params.userId),
+              eq(schema.entitlements.findingId, params.findingId)
+            )
+          );
+
+        this.processedWebhooksCache.add(params.event.event_id);
+        this.inFlightWebhooks.delete(params.event.event_id);
+
+        return {
+          status: 'SUCCESS',
+          entitlement: {
+            id: existing.id,
+            user_id: existing.userId,
+            finding_id: existing.findingId,
+            type: existing.type as any,
+            status: 'REVOKED',
+            provider: existing.provider as any,
+            provider_transaction_id: existing.providerTransactionId,
+            amount_usd: existing.amountUsd,
+            created_at: existing.createdAt,
+            updated_at: now,
+          },
+        };
+      });
+    } catch (err: any) {
+      this.inFlightWebhooks.delete(params.event.event_id);
+
+      const isLockCollision =
+        err?.code === 'SQLITE_BUSY' ||
+        String(err?.message || '').includes('locked') ||
+        String(err?.cause?.message || '').includes('locked');
+
+      if (isLockCollision) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+
+      try {
+        const committed = await this.db
+          .select({ eventId: schema.webhookEvents.eventId })
+          .from(schema.webhookEvents)
+          .where(eq(schema.webhookEvents.eventId, params.event.event_id))
+          .limit(1);
+
+        if (committed[0]) {
+          this.processedWebhooksCache.add(params.event.event_id);
+          return { status: 'DUPLICATE' };
+        }
+      } catch {
+        // Ignore fallback query failure
+      }
+
       this.processedWebhooksCache.delete(params.event.event_id);
       throw err;
     }

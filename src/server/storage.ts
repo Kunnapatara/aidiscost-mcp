@@ -208,6 +208,21 @@ export class ServerStorage implements IStorage {
 
   async createEntitlement(entitlement: Entitlement): Promise<Entitlement> {
     const key = this.entitlementKey(entitlement.user_id, entitlement.finding_id);
+    const existing = this.data.entitlements[key];
+    if (
+      existing &&
+      existing.status === 'REVOKED' &&
+      existing.provider_transaction_id === entitlement.provider_transaction_id
+    ) {
+      return existing; // Monotonic invariant
+    }
+    this.data.entitlements[key] = entitlement;
+    this.flushToDisk();
+    return entitlement;
+  }
+
+  async updateEntitlement(entitlement: Entitlement): Promise<Entitlement> {
+    const key = this.entitlementKey(entitlement.user_id, entitlement.finding_id);
     this.data.entitlements[key] = entitlement;
     this.flushToDisk();
     return entitlement;
@@ -314,11 +329,55 @@ export class ServerStorage implements IStorage {
       return { status: 'DUPLICATE' };
     }
     const key = this.entitlementKey(params.entitlement.user_id, params.entitlement.finding_id);
+    const existing = this.data.entitlements[key];
+    if (
+      existing &&
+      existing.status === 'REVOKED' &&
+      existing.provider_transaction_id === params.entitlement.provider_transaction_id
+    ) {
+      // Monotonic guard: delayed order_created must not reactivate an already revoked entitlement
+      this.data.processedWebhooks[params.event.event_id] = params.event;
+      this.inFlightWebhooks.delete(params.event.event_id);
+      this.flushToDisk();
+      return { status: 'SUCCESS' };
+    }
     this.data.entitlements[key] = params.entitlement;
     this.data.processedWebhooks[params.event.event_id] = params.event;
     this.inFlightWebhooks.delete(params.event.event_id);
     this.flushToDisk();
     return { status: 'SUCCESS' };
+  }
+
+  async processOrderRefundedWebhookTransaction(params: {
+    event: ProcessedWebhookEvent;
+    userId: string;
+    findingId: string;
+    orderId: string;
+  }): Promise<{ status: 'SUCCESS' | 'DUPLICATE' | 'NOT_FOUND' | 'MISMATCH'; entitlement?: Entitlement }> {
+    if (this.data.processedWebhooks[params.event.event_id]) {
+      this.inFlightWebhooks.delete(params.event.event_id);
+      return { status: 'DUPLICATE' };
+    }
+    const key = this.entitlementKey(params.userId, params.findingId);
+    const existing = this.data.entitlements[key];
+    if (!existing) {
+      this.inFlightWebhooks.delete(params.event.event_id);
+      return { status: 'NOT_FOUND' };
+    }
+    if (existing.provider_transaction_id && existing.provider_transaction_id !== params.orderId) {
+      this.inFlightWebhooks.delete(params.event.event_id);
+      return { status: 'MISMATCH', entitlement: existing };
+    }
+    const updated: Entitlement = {
+      ...existing,
+      status: 'REVOKED',
+      updated_at: new Date().toISOString(),
+    };
+    this.data.entitlements[key] = updated;
+    this.data.processedWebhooks[params.event.event_id] = params.event;
+    this.inFlightWebhooks.delete(params.event.event_id);
+    this.flushToDisk();
+    return { status: 'SUCCESS', entitlement: updated };
   }
 
   async processOutcomeFeeWebhookTransaction(params: {

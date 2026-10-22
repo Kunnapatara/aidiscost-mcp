@@ -896,8 +896,8 @@ export function createApiRouter(): Router {
         return;
       }
 
-      // We handle 'order_created' and 'order_settled' for payment capture & settlement
-      if (eventName === 'order_created' || eventName === 'order_settled') {
+      // We handle 'order_created', 'order_settled', and 'order_refunded' for payment lifecycle
+      if (eventName === 'order_created' || eventName === 'order_settled' || eventName === 'order_refunded') {
         const orderData = payload?.data;
         const attributes = orderData?.attributes;
         const customData = payload?.meta?.custom_data || attributes?.first_order_item?.custom;
@@ -923,7 +923,7 @@ export function createApiRouter(): Router {
         // ==========================================
         if (product.trim() === 'FIX_PACKAGE') {
           // If event is order_settled for Fix Package, record and ignore
-          if (eventName !== 'order_created') {
+          if (eventName === 'order_settled') {
             await storage.recordProcessedWebhook({
               event_id: eventId,
               provider: 'LEMON_SQUEEZY',
@@ -946,6 +946,159 @@ export function createApiRouter(): Router {
               res.status(400).json({
                 error: 'WRONG_VARIANT',
                 message: `Variant ID "${incomingVariantId}" does not match configured Fix Package variant.`,
+              });
+              return;
+            }
+          }
+
+          // Handle order_refunded event for Fix Package
+          if (eventName === 'order_refunded') {
+            // Check for partial refund vs full refund
+            const isPartial =
+              orderStatus === 'partial_refund' ||
+              (attributes?.refunded_amount !== undefined &&
+                attributes?.total !== undefined &&
+                Number(attributes?.refunded_amount) > 0 &&
+                Number(attributes?.refunded_amount) < Number(attributes?.total));
+
+            if (isPartial) {
+              await storage.recordProcessedWebhook({
+                event_id: eventId,
+                provider: 'LEMON_SQUEEZY',
+                event_name: eventName,
+                user_id: userId,
+                finding_id: findingId,
+                order_id: orderId,
+                processed_at: new Date().toISOString(),
+              });
+              res.status(200).json({ status: 'IGNORED_PARTIAL_REFUND', order_status: orderStatus });
+              return;
+            }
+
+            if (orderStatus !== 'refunded' && !attributes?.refunded) {
+              await storage.recordProcessedWebhook({
+                event_id: eventId,
+                provider: 'LEMON_SQUEEZY',
+                event_name: eventName,
+                processed_at: new Date().toISOString(),
+              });
+              res.status(200).json({ status: 'IGNORED_NON_REFUND', order_status: orderStatus });
+              return;
+            }
+
+            if (!userId || !findingId) {
+              storage.releaseWebhookClaim(eventId);
+              res.status(400).json({
+                error: 'MISSING_CUSTOM_DATA',
+                message: 'Webhook custom_data must contain user_id and finding_id.',
+              });
+              return;
+            }
+
+            const user = await storage.getUserById(userId);
+            if (!user) {
+              storage.releaseWebhookClaim(eventId);
+              res.status(404).json({ error: 'USER_NOT_FOUND', message: 'User does not exist.' });
+              return;
+            }
+
+            const ownerId = await storage.getFindingOwner(findingId);
+            if (!ownerId || ownerId !== userId) {
+              storage.releaseWebhookClaim(eventId);
+              res.status(403).json({
+                error: 'FINDING_OWNERSHIP_MISMATCH',
+                message: 'Finding is not registered to the refunded user.',
+              });
+              return;
+            }
+
+            const now = new Date().toISOString();
+            const eventData = {
+              event_id: eventId,
+              provider: 'LEMON_SQUEEZY' as const,
+              event_name: eventName,
+              user_id: userId,
+              finding_id: findingId,
+              order_id: orderId,
+              processed_at: now,
+            };
+
+            if (typeof storage.processOrderRefundedWebhookTransaction === 'function') {
+              const txRes = await storage.processOrderRefundedWebhookTransaction({
+                event: eventData,
+                userId,
+                findingId,
+                orderId,
+              });
+
+              if (txRes.status === 'DUPLICATE') {
+                res.status(200).json({
+                  status: 'IDEMPOTENT_DUPLICATE',
+                  message: 'Event has already been processed or is currently being processed.',
+                });
+                return;
+              }
+
+              if (txRes.status === 'NOT_FOUND') {
+                storage.releaseWebhookClaim(eventId);
+                res.status(404).json({
+                  error: 'ENTITLEMENT_NOT_FOUND',
+                  message: 'No entitlement found for the refunded order.',
+                });
+                return;
+              }
+
+              if (txRes.status === 'MISMATCH') {
+                storage.releaseWebhookClaim(eventId);
+                res.status(400).json({
+                  error: 'ORDER_MISMATCH',
+                  message: 'Refund order ID does not match entitlement transaction ID.',
+                });
+                return;
+              }
+
+              res.status(200).json({
+                status: 'SUCCESS',
+                action: 'REVOKED',
+                entitlement_id: txRes.entitlement?.id,
+                finding_id: findingId,
+              });
+              return;
+            } else {
+              const existing = await storage.getEntitlement(userId, findingId);
+              if (!existing) {
+                storage.releaseWebhookClaim(eventId);
+                res.status(404).json({
+                  error: 'ENTITLEMENT_NOT_FOUND',
+                  message: 'No entitlement found for the refunded order.',
+                });
+                return;
+              }
+              if (existing.provider_transaction_id && existing.provider_transaction_id !== orderId) {
+                storage.releaseWebhookClaim(eventId);
+                res.status(400).json({
+                  error: 'ORDER_MISMATCH',
+                  message: 'Refund order ID does not match entitlement transaction ID.',
+                });
+                return;
+              }
+              const revoked: Entitlement = {
+                ...existing,
+                status: 'REVOKED',
+                updated_at: now,
+              };
+              if (typeof storage.updateEntitlement === 'function') {
+                await storage.updateEntitlement(revoked);
+              } else {
+                await storage.createEntitlement(revoked);
+              }
+              await storage.recordProcessedWebhook(eventData);
+
+              res.status(200).json({
+                status: 'SUCCESS',
+                action: 'REVOKED',
+                entitlement_id: revoked.id,
+                finding_id: findingId,
               });
               return;
             }

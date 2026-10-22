@@ -23,6 +23,7 @@ export interface IStorage {
 
   // --- Entitlement Operations ---
   createEntitlement(entitlement: Entitlement): Promise<Entitlement>;
+  updateEntitlement?(entitlement: Entitlement): Promise<Entitlement>;
   getEntitlement(userId: string, findingId: string): Promise<Entitlement | null>;
   hasActivePaidEntitlement(userId: string, findingId: string): Promise<boolean>;
 
@@ -52,6 +53,17 @@ export interface IStorage {
     event: ProcessedWebhookEvent;
     entitlement: Entitlement;
   }): Promise<{ status: 'SUCCESS' | 'DUPLICATE' }>;
+
+  /**
+   * Atomically records the processed webhook event and revokes the matching entitlement
+   * inside a single database transaction. If the event ID was already committed, returns 'DUPLICATE'.
+   */
+  processOrderRefundedWebhookTransaction?(params: {
+    event: ProcessedWebhookEvent;
+    userId: string;
+    findingId: string;
+    orderId: string;
+  }): Promise<{ status: 'SUCCESS' | 'DUPLICATE' | 'NOT_FOUND' | 'MISMATCH'; entitlement?: Entitlement }>;
 
   /**
    * Atomically records the processed webhook event and updates the outcome fee obligation status
