@@ -1074,11 +1074,19 @@ export function createApiRouter(): Router {
                 });
                 return;
               }
-              if (existing.provider_transaction_id && existing.provider_transaction_id !== orderId) {
+              const hasValidTransactionId = Boolean(
+                existing.provider_transaction_id && existing.provider_transaction_id.trim() !== ''
+              );
+              const matchesOrder = hasValidTransactionId && existing.provider_transaction_id === orderId;
+              const matchesProvider = existing.provider === 'LEMON_SQUEEZY';
+              const matchesType = existing.type === 'PAID_FIX_PACKAGE';
+              const isEligibleStatus = existing.status === 'ACTIVE';
+
+              if (!matchesOrder || !matchesProvider || !matchesType || !isEligibleStatus) {
                 storage.releaseWebhookClaim(eventId);
                 res.status(400).json({
                   error: 'ORDER_MISMATCH',
-                  message: 'Refund order ID does not match entitlement transaction ID.',
+                  message: 'Refund order ID or entitlement attributes do not match eligible purchase.',
                 });
                 return;
               }

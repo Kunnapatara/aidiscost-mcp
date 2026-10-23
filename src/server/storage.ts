@@ -364,10 +364,21 @@ export class ServerStorage implements IStorage {
       this.inFlightWebhooks.delete(params.event.event_id);
       return { status: 'NOT_FOUND' };
     }
-    if (existing.provider_transaction_id && existing.provider_transaction_id !== params.orderId) {
+
+    // Fail closed: enforce exact transaction ID, provider, type, and eligible status
+    const hasValidTransactionId = Boolean(
+      existing.provider_transaction_id && existing.provider_transaction_id.trim() !== ''
+    );
+    const matchesOrder = hasValidTransactionId && existing.provider_transaction_id === params.orderId;
+    const matchesProvider = existing.provider === 'LEMON_SQUEEZY';
+    const matchesType = existing.type === 'PAID_FIX_PACKAGE';
+    const isEligibleStatus = existing.status === 'ACTIVE';
+
+    if (!matchesOrder || !matchesProvider || !matchesType || !isEligibleStatus) {
       this.inFlightWebhooks.delete(params.event.event_id);
       return { status: 'MISMATCH', entitlement: existing };
     }
+
     const updated: Entitlement = {
       ...existing,
       status: 'REVOKED',

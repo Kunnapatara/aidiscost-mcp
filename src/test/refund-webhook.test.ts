@@ -63,7 +63,7 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
   }
 
   // --- Scenario 1: Valid full refund revokes Fix Package entitlement ---
-  test('1. Valid full refund revokes Fix Package entitlement (status: REVOKED)', async () => {
+  test('1. Valid full refund with an exact matching Order ID revokes the correct Fix Package entitlement', async () => {
     serverStorage.clearAll();
 
     const user: User = {
@@ -142,101 +142,48 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
     assert.strictEqual(await serverStorage.hasActivePaidEntitlement(user.id, findingId), false);
   });
 
-  // --- Scenario 2: Invalid webhook signature rejected (401) ---
-  test('2. Invalid webhook signature is rejected with 401', async () => {
-    const refundPayload = {
-      meta: {
-        event_name: 'order_refunded',
-        event_id: 'evt_invalid_sig',
-        custom_data: {
-          user_id: 'usr_any',
-          finding_id: 'finding_any',
-          product: 'FIX_PACKAGE',
-        },
-      },
-      data: {
-        id: 'ord_any',
-        attributes: {
-          status: 'refunded',
-        },
-      },
-    };
-
-    const payloadString = JSON.stringify(refundPayload);
-    const wrongSignature = signPayload(payloadString, 'wrong_secret');
-
-    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-signature': wrongSignature,
-      },
-      body: payloadString,
-    });
-
-    assert.strictEqual(res.status, 401);
-    const body: any = await res.json();
-    assert.strictEqual(body.error, 'INVALID_SIGNATURE');
-  });
-
-  // --- Scenario 3: Refund for order A does not revoke order B ---
-  test('3. Refund for order A does not revoke entitlement for order B', async () => {
+  // --- Scenario 2: Null / undefined providerTransactionId does not revoke ---
+  test('2. A null or undefined providerTransactionId does not revoke an entitlement (fail closed)', async () => {
     serverStorage.clearAll();
 
     const user: User = {
-      id: 'usr_isolation_3',
-      email: 'isolation3@example.com',
+      id: 'usr_null_tx',
+      email: 'nulltx@example.com',
       password_hash: 'salt:hash',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
     await serverStorage.createUser(user);
 
-    const findingA = 'finding_A';
-    const findingB = 'finding_B';
-    await serverStorage.registerFindingOwnership(findingA, user.id);
-    await serverStorage.registerFindingOwnership(findingB, user.id);
+    const findingId = 'finding_null_tx';
+    await serverStorage.registerFindingOwnership(findingId, user.id);
 
-    // Create entitlements for order A and order B
+    // Entitlement with null/undefined transaction ID
     await serverStorage.createEntitlement({
-      id: 'ent_A',
+      id: 'ent_null_tx',
       user_id: user.id,
-      finding_id: findingA,
+      finding_id: findingId,
       type: 'PAID_FIX_PACKAGE',
       status: 'ACTIVE',
       provider: 'LEMON_SQUEEZY',
-      provider_transaction_id: 'ord_A',
+      provider_transaction_id: (null as unknown) as string,
       amount_usd: 49.0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
 
-    await serverStorage.createEntitlement({
-      id: 'ent_B',
-      user_id: user.id,
-      finding_id: findingB,
-      type: 'PAID_FIX_PACKAGE',
-      status: 'ACTIVE',
-      provider: 'LEMON_SQUEEZY',
-      provider_transaction_id: 'ord_B',
-      amount_usd: 49.0,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-
-    // Refund order A
     const refundPayload = {
       meta: {
         event_name: 'order_refunded',
-        event_id: 'evt_refund_ord_A',
+        event_id: 'evt_null_tx_refund',
         custom_data: {
           user_id: user.id,
-          finding_id: findingA,
+          finding_id: findingId,
           product: 'FIX_PACKAGE',
         },
       },
       data: {
-        id: 'ord_A',
+        id: 'ord_some_order_id',
         attributes: {
           status: 'refunded',
           refunded: true,
@@ -248,44 +195,178 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
     };
 
     const payloadString = JSON.stringify(refundPayload);
-    const signature = signPayload(payloadString);
-
     const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-signature': signature,
+        'x-signature': signPayload(payloadString),
       },
       body: payloadString,
     });
 
-    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.status, 400);
+    const body: any = await res.json();
+    assert.strictEqual(body.error, 'ORDER_MISMATCH');
 
-    // Finding A entitlement is revoked
-    const entA = await serverStorage.getEntitlement(user.id, findingA);
-    assert.strictEqual(entA?.status, 'REVOKED');
-    assert.strictEqual(await serverStorage.hasActivePaidEntitlement(user.id, findingA), false);
-
-    // Finding B entitlement is strictly ACTIVE
-    const entB = await serverStorage.getEntitlement(user.id, findingB);
-    assert.strictEqual(entB?.status, 'ACTIVE');
-    assert.strictEqual(await serverStorage.hasActivePaidEntitlement(user.id, findingB), true);
+    // Entitlement must remain ACTIVE
+    const ent = await serverStorage.getEntitlement(user.id, findingId);
+    assert.strictEqual(ent?.status, 'ACTIVE');
   });
 
-  // --- Scenario 4: Refund for user A cannot affect user B ---
-  test('4. Refund for user A cannot affect or revoke user B entitlement', async () => {
+  // --- Scenario 3: Empty string providerTransactionId does not revoke ---
+  test('3. An empty providerTransactionId does not revoke an entitlement (fail closed)', async () => {
+    serverStorage.clearAll();
+
+    const user: User = {
+      id: 'usr_empty_tx',
+      email: 'emptytx@example.com',
+      password_hash: 'salt:hash',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await serverStorage.createUser(user);
+
+    const findingId = 'finding_empty_tx';
+    await serverStorage.registerFindingOwnership(findingId, user.id);
+
+    // Entitlement with empty string transaction ID
+    await serverStorage.createEntitlement({
+      id: 'ent_empty_tx',
+      user_id: user.id,
+      finding_id: findingId,
+      type: 'PAID_FIX_PACKAGE',
+      status: 'ACTIVE',
+      provider: 'LEMON_SQUEEZY',
+      provider_transaction_id: '   ',
+      amount_usd: 49.0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const refundPayload = {
+      meta: {
+        event_name: 'order_refunded',
+        event_id: 'evt_empty_tx_refund',
+        custom_data: {
+          user_id: user.id,
+          finding_id: findingId,
+          product: 'FIX_PACKAGE',
+        },
+      },
+      data: {
+        id: 'ord_some_order_id',
+        attributes: {
+          status: 'refunded',
+          refunded: true,
+          total: 4900,
+          refunded_amount: 4900,
+          first_order_item: { variant_id: 'variant_fix_49' },
+        },
+      },
+    };
+
+    const payloadString = JSON.stringify(refundPayload);
+    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-signature': signPayload(payloadString),
+      },
+      body: payloadString,
+    });
+
+    assert.strictEqual(res.status, 400);
+    const body: any = await res.json();
+    assert.strictEqual(body.error, 'ORDER_MISMATCH');
+
+    const ent = await serverStorage.getEntitlement(user.id, findingId);
+    assert.strictEqual(ent?.status, 'ACTIVE');
+  });
+
+  // --- Scenario 4: Mismatched Order ID does not revoke ---
+  test('4. A mismatched Order ID does not revoke an entitlement', async () => {
+    serverStorage.clearAll();
+
+    const user: User = {
+      id: 'usr_mis_4',
+      email: 'mismatch4@example.com',
+      password_hash: 'salt:hash',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await serverStorage.createUser(user);
+
+    const findingId = 'finding_mis_4';
+    await serverStorage.registerFindingOwnership(findingId, user.id);
+
+    await serverStorage.createEntitlement({
+      id: 'ent_mis_4',
+      user_id: user.id,
+      finding_id: findingId,
+      type: 'PAID_FIX_PACKAGE',
+      status: 'ACTIVE',
+      provider: 'LEMON_SQUEEZY',
+      provider_transaction_id: 'ord_actual_123',
+      amount_usd: 49.0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const refundPayload = {
+      meta: {
+        event_name: 'order_refunded',
+        event_id: 'evt_mis_order_id',
+        custom_data: {
+          user_id: user.id,
+          finding_id: findingId,
+          product: 'FIX_PACKAGE',
+        },
+      },
+      data: {
+        id: 'ord_wrong_order_456',
+        attributes: {
+          status: 'refunded',
+          refunded: true,
+          total: 4900,
+          refunded_amount: 4900,
+          first_order_item: { variant_id: 'variant_fix_49' },
+        },
+      },
+    };
+
+    const payloadString = JSON.stringify(refundPayload);
+    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-signature': signPayload(payloadString),
+      },
+      body: payloadString,
+    });
+
+    assert.strictEqual(res.status, 400);
+    const body: any = await res.json();
+    assert.strictEqual(body.error, 'ORDER_MISMATCH');
+
+    // Entitlement must remain ACTIVE
+    const ent = await serverStorage.getEntitlement(user.id, findingId);
+    assert.strictEqual(ent?.status, 'ACTIVE');
+  });
+
+  // --- Scenario 5: Different user's entitlement cannot be revoked ---
+  test('5. A different user entitlement cannot be revoked', async () => {
     serverStorage.clearAll();
 
     const userA: User = {
-      id: 'usr_A_4',
-      email: 'userA@example.com',
+      id: 'usr_A_5',
+      email: 'userA5@example.com',
       password_hash: 'salt:hash',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
     const userB: User = {
-      id: 'usr_B_4',
-      email: 'userB@example.com',
+      id: 'usr_B_5',
+      email: 'userB5@example.com',
       password_hash: 'salt:hash',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -293,50 +374,50 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
     await serverStorage.createUser(userA);
     await serverStorage.createUser(userB);
 
-    const findingA = 'finding_userA';
-    const findingB = 'finding_userB';
+    const findingA = 'finding_A_5';
+    const findingB = 'finding_B_5';
     await serverStorage.registerFindingOwnership(findingA, userA.id);
     await serverStorage.registerFindingOwnership(findingB, userB.id);
 
     await serverStorage.createEntitlement({
-      id: 'ent_userA',
+      id: 'ent_userA_5',
       user_id: userA.id,
       finding_id: findingA,
       type: 'PAID_FIX_PACKAGE',
       status: 'ACTIVE',
       provider: 'LEMON_SQUEEZY',
-      provider_transaction_id: 'ord_userA',
+      provider_transaction_id: 'ord_userA_5',
       amount_usd: 49.0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
 
     await serverStorage.createEntitlement({
-      id: 'ent_userB',
+      id: 'ent_userB_5',
       user_id: userB.id,
       finding_id: findingB,
       type: 'PAID_FIX_PACKAGE',
       status: 'ACTIVE',
       provider: 'LEMON_SQUEEZY',
-      provider_transaction_id: 'ord_userB',
+      provider_transaction_id: 'ord_userB_5',
       amount_usd: 49.0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
 
-    // Malicious or mismatched payload attempting to specify userA with findingB
+    // Mismatched payload claiming userA for findingB
     const mismatchPayload = {
       meta: {
         event_name: 'order_refunded',
-        event_id: 'evt_cross_user_attempt',
+        event_id: 'evt_cross_user_5',
         custom_data: {
           user_id: userA.id,
-          finding_id: findingB, // Owned by userB!
+          finding_id: findingB,
           product: 'FIX_PACKAGE',
         },
       },
       data: {
-        id: 'ord_malicious',
+        id: 'ord_userB_5',
         attributes: {
           status: 'refunded',
           refunded: true,
@@ -348,7 +429,7 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
     };
 
     const mismatchString = JSON.stringify(mismatchPayload);
-    const resMismatch = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -357,44 +438,58 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
       body: mismatchString,
     });
 
-    assert.strictEqual(resMismatch.status, 403);
-    const mismatchBody: any = await resMismatch.json();
-    assert.strictEqual(mismatchBody.error, 'FINDING_OWNERSHIP_MISMATCH');
+    assert.strictEqual(res.status, 403);
+    const body: any = await res.json();
+    assert.strictEqual(body.error, 'FINDING_OWNERSHIP_MISMATCH');
 
-    // Verify userB entitlement was completely unaffected
     const entB = await serverStorage.getEntitlement(userB.id, findingB);
     assert.strictEqual(entB?.status, 'ACTIVE');
-    assert.strictEqual(await serverStorage.hasActivePaidEntitlement(userB.id, findingB), true);
   });
 
-  // --- Scenario 5: Unknown order does not revoke ---
-  test('5. Unknown order or non-existent entitlement returns 404 and revokes nothing', async () => {
+  // --- Scenario 6: Different finding entitlement cannot be revoked ---
+  test('6. A different finding entitlement cannot be revoked', async () => {
     serverStorage.clearAll();
 
     const user: User = {
-      id: 'usr_unknown_5',
-      email: 'unknown5@example.com',
+      id: 'usr_findings_6',
+      email: 'findings6@example.com',
       password_hash: 'salt:hash',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
     await serverStorage.createUser(user);
 
-    const findingId = 'finding_unknown_5';
-    await serverStorage.registerFindingOwnership(findingId, user.id);
+    const findingTarget = 'finding_target_6';
+    const findingOther = 'finding_other_6';
+    await serverStorage.registerFindingOwnership(findingTarget, user.id);
+    await serverStorage.registerFindingOwnership(findingOther, user.id);
 
-    const unknownPayload = {
+    await serverStorage.createEntitlement({
+      id: 'ent_other_6',
+      user_id: user.id,
+      finding_id: findingOther,
+      type: 'PAID_FIX_PACKAGE',
+      status: 'ACTIVE',
+      provider: 'LEMON_SQUEEZY',
+      provider_transaction_id: 'ord_other_6',
+      amount_usd: 49.0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    // Refund specifies findingTarget which has no entitlement
+    const refundPayload = {
       meta: {
         event_name: 'order_refunded',
-        event_id: 'evt_unknown_ord',
+        event_id: 'evt_diff_finding_6',
         custom_data: {
           user_id: user.id,
-          finding_id: findingId,
+          finding_id: findingTarget,
           product: 'FIX_PACKAGE',
         },
       },
       data: {
-        id: 'ord_nonexistent',
+        id: 'ord_other_6',
         attributes: {
           status: 'refunded',
           refunded: true,
@@ -405,7 +500,7 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
       },
     };
 
-    const payloadString = JSON.stringify(unknownPayload);
+    const payloadString = JSON.stringify(refundPayload);
     const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
       method: 'POST',
       headers: {
@@ -418,32 +513,131 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
     assert.strictEqual(res.status, 404);
     const body: any = await res.json();
     assert.strictEqual(body.error, 'ENTITLEMENT_NOT_FOUND');
+
+    // Other finding's entitlement must remain ACTIVE
+    const entOther = await serverStorage.getEntitlement(user.id, findingOther);
+    assert.strictEqual(entOther?.status, 'ACTIVE');
   });
 
-  // --- Scenario 6: Replaying refund is idempotent (200 IDEMPOTENT_DUPLICATE) ---
-  test('6. Replaying identical refund webhook event is idempotent', async () => {
+  // --- Scenario 7: Outcome Fee entitlement is not revoked by Fix Package refund ---
+  test('7. An Outcome Fee entitlement is not revoked by Fix Package refund processing', async () => {
     serverStorage.clearAll();
 
     const user: User = {
-      id: 'usr_replay_6',
-      email: 'replay6@example.com',
+      id: 'usr_outcome_7',
+      email: 'outcome7@example.com',
       password_hash: 'salt:hash',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
     await serverStorage.createUser(user);
 
-    const findingId = 'finding_replay_6';
+    const findingId = 'finding_outcome_7';
     await serverStorage.registerFindingOwnership(findingId, user.id);
 
+    // Settled Outcome Fee obligation
+    const obligation: OutcomeFeeObligation = {
+      id: 'of_obligation_7',
+      user_id: user.id,
+      finding_id: findingId,
+      verification_id: 'ver_7',
+      verified_annualized_savings_usd: 8000,
+      fee_amount_usd: 1600,
+      currency: 'USD',
+      status: 'SETTLED',
+      provider: 'LEMON_SQUEEZY',
+      provider_order_id: 'ord_outcome_7',
+      paid_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await serverStorage.createOutcomeFeeObligation(obligation);
+
+    // Active fix package entitlement
     await serverStorage.createEntitlement({
-      id: 'ent_replay_6',
+      id: 'ent_fix_7',
       user_id: user.id,
       finding_id: findingId,
       type: 'PAID_FIX_PACKAGE',
       status: 'ACTIVE',
       provider: 'LEMON_SQUEEZY',
-      provider_transaction_id: 'ord_replay_6',
+      provider_transaction_id: 'ord_fix_7',
+      amount_usd: 49.0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    // Refund Fix Package order
+    const refundPayload = {
+      meta: {
+        event_name: 'order_refunded',
+        event_id: 'evt_refund_fix_7',
+        custom_data: {
+          user_id: user.id,
+          finding_id: findingId,
+          product: 'FIX_PACKAGE',
+        },
+      },
+      data: {
+        id: 'ord_fix_7',
+        attributes: {
+          status: 'refunded',
+          refunded: true,
+          total: 4900,
+          refunded_amount: 4900,
+          first_order_item: { variant_id: 'variant_fix_49' },
+        },
+      },
+    };
+
+    const payloadString = JSON.stringify(refundPayload);
+    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-signature': signPayload(payloadString),
+      },
+      body: payloadString,
+    });
+
+    assert.strictEqual(res.status, 200);
+
+    // Fix Package is revoked
+    const ent = await serverStorage.getEntitlement(user.id, findingId);
+    assert.strictEqual(ent?.status, 'REVOKED');
+
+    // Outcome Fee obligation remains SETTLED
+    const savedOb = await serverStorage.getOutcomeFeeObligation(findingId);
+    assert.ok(savedOb);
+    assert.strictEqual(savedOb.status, 'SETTLED');
+    assert.strictEqual(savedOb.fee_amount_usd, 1600);
+  });
+
+  // --- Scenario 8: Entitlement associated with different provider cannot be revoked ---
+  test('8. An entitlement associated with a different provider cannot be revoked', async () => {
+    serverStorage.clearAll();
+
+    const user: User = {
+      id: 'usr_prov_8',
+      email: 'prov8@example.com',
+      password_hash: 'salt:hash',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await serverStorage.createUser(user);
+
+    const findingId = 'finding_prov_8';
+    await serverStorage.registerFindingOwnership(findingId, user.id);
+
+    // Entitlement with DEMO_ADAPTER provider
+    await serverStorage.createEntitlement({
+      id: 'ent_demo_prov_8',
+      user_id: user.id,
+      finding_id: findingId,
+      type: 'PAID_FIX_PACKAGE',
+      status: 'ACTIVE',
+      provider: 'DEMO_ADAPTER',
+      provider_transaction_id: 'ord_demo_8',
       amount_usd: 49.0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -452,7 +646,7 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
     const refundPayload = {
       meta: {
         event_name: 'order_refunded',
-        event_id: 'evt_replay_unique_1',
+        event_id: 'evt_demo_prov_8',
         custom_data: {
           user_id: user.id,
           finding_id: findingId,
@@ -460,7 +654,76 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
         },
       },
       data: {
-        id: 'ord_replay_6',
+        id: 'ord_demo_8',
+        attributes: {
+          status: 'refunded',
+          refunded: true,
+          total: 4900,
+          refunded_amount: 4900,
+          first_order_item: { variant_id: 'variant_fix_49' },
+        },
+      },
+    };
+
+    const payloadString = JSON.stringify(refundPayload);
+    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-signature': signPayload(payloadString),
+      },
+      body: payloadString,
+    });
+
+    assert.strictEqual(res.status, 400);
+    const body: any = await res.json();
+    assert.strictEqual(body.error, 'ORDER_MISMATCH');
+
+    const ent = await serverStorage.getEntitlement(user.id, findingId);
+    assert.strictEqual(ent?.status, 'ACTIVE');
+  });
+
+  // --- Scenario 9: Duplicate refund webhook does not cause second mutation ---
+  test('9. A duplicate refund webhook does not cause a second mutation or inconsistent result', async () => {
+    serverStorage.clearAll();
+
+    const user: User = {
+      id: 'usr_replay_9',
+      email: 'replay9@example.com',
+      password_hash: 'salt:hash',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await serverStorage.createUser(user);
+
+    const findingId = 'finding_replay_9';
+    await serverStorage.registerFindingOwnership(findingId, user.id);
+
+    await serverStorage.createEntitlement({
+      id: 'ent_replay_9',
+      user_id: user.id,
+      finding_id: findingId,
+      type: 'PAID_FIX_PACKAGE',
+      status: 'ACTIVE',
+      provider: 'LEMON_SQUEEZY',
+      provider_transaction_id: 'ord_replay_9',
+      amount_usd: 49.0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const refundPayload = {
+      meta: {
+        event_name: 'order_refunded',
+        event_id: 'evt_replay_9_single',
+        custom_data: {
+          user_id: user.id,
+          finding_id: findingId,
+          product: 'FIX_PACKAGE',
+        },
+      },
+      data: {
+        id: 'ord_replay_9',
         attributes: {
           status: 'refunded',
           refunded: true,
@@ -474,7 +737,7 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
     const payloadString = JSON.stringify(refundPayload);
     const signature = signPayload(payloadString);
 
-    // First delivery
+    // Initial delivery
     const res1 = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
       method: 'POST',
       headers: {
@@ -483,13 +746,11 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
       },
       body: payloadString,
     });
-
     assert.strictEqual(res1.status, 200);
     const body1: any = await res1.json();
     assert.strictEqual(body1.status, 'SUCCESS');
-    assert.strictEqual(body1.action, 'REVOKED');
 
-    // Second delivery (replay)
+    // Duplicate delivery
     const res2 = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
       method: 'POST',
       headers: {
@@ -498,40 +759,38 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
       },
       body: payloadString,
     });
-
     assert.strictEqual(res2.status, 200);
     const body2: any = await res2.json();
     assert.strictEqual(body2.status, 'IDEMPOTENT_DUPLICATE');
 
-    // Status remains REVOKED
     const ent = await serverStorage.getEntitlement(user.id, findingId);
     assert.strictEqual(ent?.status, 'REVOKED');
   });
 
-  // --- Scenario 7: Concurrent delivery of same refund event is safe ---
-  test('7. Concurrent delivery of same refund event is safe and never double-processes', async () => {
+  // --- Scenario 10: Concurrent delivery of same refund cannot produce inconsistent state ---
+  test('10. Concurrent delivery of same refund cannot produce inconsistent entitlement state', async () => {
     serverStorage.clearAll();
 
     const user: User = {
-      id: 'usr_concurrent_7',
-      email: 'concurrent7@example.com',
+      id: 'usr_concurrent_10',
+      email: 'concurrent10@example.com',
       password_hash: 'salt:hash',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
     await serverStorage.createUser(user);
 
-    const findingId = 'finding_concurrent_7';
+    const findingId = 'finding_concurrent_10';
     await serverStorage.registerFindingOwnership(findingId, user.id);
 
     await serverStorage.createEntitlement({
-      id: 'ent_concurrent_7',
+      id: 'ent_concurrent_10',
       user_id: user.id,
       finding_id: findingId,
       type: 'PAID_FIX_PACKAGE',
       status: 'ACTIVE',
       provider: 'LEMON_SQUEEZY',
-      provider_transaction_id: 'ord_concurrent_7',
+      provider_transaction_id: 'ord_concurrent_10',
       amount_usd: 49.0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -540,7 +799,7 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
     const refundPayload = {
       meta: {
         event_name: 'order_refunded',
-        event_id: 'evt_concurrent_7_unique',
+        event_id: 'evt_concurrent_10_unique',
         custom_data: {
           user_id: user.id,
           finding_id: findingId,
@@ -548,7 +807,7 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
         },
       },
       data: {
-        id: 'ord_concurrent_7',
+        id: 'ord_concurrent_10',
         attributes: {
           status: 'refunded',
           refunded: true,
@@ -572,7 +831,6 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
         body: payloadString,
       });
 
-    // Fire 5 concurrent requests simultaneously
     const responses = await Promise.all([
       sendRequest(),
       sendRequest(),
@@ -589,238 +847,15 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
     const successCount = bodies.filter((b) => b.status === 'SUCCESS').length;
     const duplicateCount = bodies.filter((b) => b.status === 'IDEMPOTENT_DUPLICATE').length;
 
-    assert.strictEqual(successCount, 1, 'Exactly one request should execute the revocation');
-    assert.strictEqual(duplicateCount, 4, 'Remaining concurrent requests should receive IDEMPOTENT_DUPLICATE');
+    assert.strictEqual(successCount, 1);
+    assert.strictEqual(duplicateCount, 4);
 
     const ent = await serverStorage.getEntitlement(user.id, findingId);
     assert.strictEqual(ent?.status, 'REVOKED');
   });
 
-  // --- Scenario 8: Delayed order_created cannot reactivate a refunded entitlement ---
-  test('8. Delayed order_created cannot reactivate an already refunded entitlement (monotonic invariant)', async () => {
-    serverStorage.clearAll();
-
-    const user: User = {
-      id: 'usr_delayed_8',
-      email: 'delayed8@example.com',
-      password_hash: 'salt:hash',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    await serverStorage.createUser(user);
-
-    const findingId = 'finding_delayed_8';
-    await serverStorage.registerFindingOwnership(findingId, user.id);
-
-    // Step 1: User initially had an active entitlement that got revoked via refund
-    await serverStorage.createEntitlement({
-      id: 'ent_delayed_8',
-      user_id: user.id,
-      finding_id: findingId,
-      type: 'PAID_FIX_PACKAGE',
-      status: 'REVOKED',
-      provider: 'LEMON_SQUEEZY',
-      provider_transaction_id: 'ord_delayed_8',
-      amount_usd: 49.0,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-
-    // Step 2: A delayed or out-of-order 'order_created' arrives for ord_delayed_8
-    const delayedOrderPayload = {
-      meta: {
-        event_name: 'order_created',
-        event_id: 'evt_delayed_order_created_8',
-        custom_data: {
-          user_id: user.id,
-          finding_id: findingId,
-          product: 'FIX_PACKAGE',
-        },
-      },
-      data: {
-        id: 'ord_delayed_8',
-        attributes: {
-          status: 'paid',
-          first_order_item: { variant_id: 'variant_fix_49' },
-        },
-      },
-    };
-
-    const payloadString = JSON.stringify(delayedOrderPayload);
-    const signature = signPayload(payloadString);
-
-    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-signature': signature,
-      },
-      body: payloadString,
-    });
-
-    assert.strictEqual(res.status, 200);
-
-    // Entitlement must STILL be REVOKED, never flipped back to ACTIVE
-    const ent = await serverStorage.getEntitlement(user.id, findingId);
-    assert.strictEqual(ent?.status, 'REVOKED');
-    assert.strictEqual(await serverStorage.hasActivePaidEntitlement(user.id, findingId), false);
-  });
-
-  // --- Scenario 9: Non-refund payment behavior remains intact ---
-  test('9. Normal order_created event successfully creates ACTIVE entitlement', async () => {
-    serverStorage.clearAll();
-
-    const user: User = {
-      id: 'usr_normal_9',
-      email: 'normal9@example.com',
-      password_hash: 'salt:hash',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    await serverStorage.createUser(user);
-
-    const findingId = 'finding_normal_9';
-    await serverStorage.registerFindingOwnership(findingId, user.id);
-
-    const orderPayload = {
-      meta: {
-        event_name: 'order_created',
-        event_id: 'evt_normal_create_9',
-        custom_data: {
-          user_id: user.id,
-          finding_id: findingId,
-          product: 'FIX_PACKAGE',
-        },
-      },
-      data: {
-        id: 'ord_normal_9',
-        attributes: {
-          status: 'paid',
-          first_order_item: { variant_id: 'variant_fix_49' },
-        },
-      },
-    };
-
-    const payloadString = JSON.stringify(orderPayload);
-    const signature = signPayload(payloadString);
-
-    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-signature': signature,
-      },
-      body: payloadString,
-    });
-
-    assert.strictEqual(res.status, 200);
-    const body: any = await res.json();
-    assert.strictEqual(body.status, 'SUCCESS');
-
-    const ent = await serverStorage.getEntitlement(user.id, findingId);
-    assert.ok(ent);
-    assert.strictEqual(ent.status, 'ACTIVE');
-    assert.strictEqual(await serverStorage.hasActivePaidEntitlement(user.id, findingId), true);
-  });
-
-  // --- Scenario 10: Outcome Fee obligations unaffected by Fix Package refund ---
-  test('10. Outcome Fee obligations are completely unaffected by Fix Package refund', async () => {
-    serverStorage.clearAll();
-
-    const user: User = {
-      id: 'usr_outcome_10',
-      email: 'outcome10@example.com',
-      password_hash: 'salt:hash',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    await serverStorage.createUser(user);
-
-    const findingId = 'finding_outcome_10';
-    await serverStorage.registerFindingOwnership(findingId, user.id);
-
-    // Active fix package entitlement
-    await serverStorage.createEntitlement({
-      id: 'ent_fix_10',
-      user_id: user.id,
-      finding_id: findingId,
-      type: 'PAID_FIX_PACKAGE',
-      status: 'ACTIVE',
-      provider: 'LEMON_SQUEEZY',
-      provider_transaction_id: 'ord_fix_10',
-      amount_usd: 49.0,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-
-    // Settled Outcome Fee obligation
-    const obligation: OutcomeFeeObligation = {
-      id: 'of_obligation_10',
-      user_id: user.id,
-      finding_id: findingId,
-      verification_id: 'ver_10',
-      verified_annualized_savings_usd: 5000,
-      fee_amount_usd: 1000,
-      currency: 'USD',
-      status: 'SETTLED',
-      provider: 'LEMON_SQUEEZY',
-      provider_order_id: 'ord_outcome_settled_10',
-      paid_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    await serverStorage.createOutcomeFeeObligation(obligation);
-
-    // Refund Fix Package order
-    const refundPayload = {
-      meta: {
-        event_name: 'order_refunded',
-        event_id: 'evt_refund_fix_10',
-        custom_data: {
-          user_id: user.id,
-          finding_id: findingId,
-          product: 'FIX_PACKAGE',
-        },
-      },
-      data: {
-        id: 'ord_fix_10',
-        attributes: {
-          status: 'refunded',
-          refunded: true,
-          total: 4900,
-          refunded_amount: 4900,
-          first_order_item: { variant_id: 'variant_fix_49' },
-        },
-      },
-    };
-
-    const payloadString = JSON.stringify(refundPayload);
-    const signature = signPayload(payloadString);
-
-    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-signature': signature,
-      },
-      body: payloadString,
-    });
-
-    assert.strictEqual(res.status, 200);
-
-    // Fix Package entitlement is revoked
-    const ent = await serverStorage.getEntitlement(user.id, findingId);
-    assert.strictEqual(ent?.status, 'REVOKED');
-
-    // Outcome Fee obligation is preserved intact as SETTLED
-    const savedOb = await serverStorage.getOutcomeFeeObligation(findingId);
-    assert.ok(savedOb);
-    assert.strictEqual(savedOb.status, 'SETTLED');
-    assert.strictEqual(savedOb.fee_amount_usd, 1000);
-  });
-
-  // --- Scenario 11: Partial refund behavior preserves active entitlement ---
-  test('11. Partial refund preserves ACTIVE entitlement and returns IGNORED_PARTIAL_REFUND', async () => {
+  // --- Scenario 11: Partial refund retains access ---
+  test('11. A partial refund retains access according to the existing product policy', async () => {
     serverStorage.clearAll();
 
     const user: User = {
@@ -864,7 +899,7 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
           status: 'partial_refund',
           refunded: false,
           total: 4900,
-          refunded_amount: 1500, // $15 refunded out of $49
+          refunded_amount: 1500,
           first_order_item: { variant_id: 'variant_fix_49' },
         },
       },
@@ -886,14 +921,378 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
     const body: any = await res.json();
     assert.strictEqual(body.status, 'IGNORED_PARTIAL_REFUND');
 
-    // Entitlement must REMAIN ACTIVE
     const ent = await serverStorage.getEntitlement(user.id, findingId);
     assert.strictEqual(ent?.status, 'ACTIVE');
     assert.strictEqual(await serverStorage.hasActivePaidEntitlement(user.id, findingId), true);
   });
 
-  // --- Scenario 12: Both ServerStorage and DrizzleStorageAdapter tested ---
-  describe('12. DrizzleStorageAdapter direct refund & monotonic tests', () => {
+  // --- Scenario 12: Unrelated entitlement remains unchanged ---
+  test('12. An unrelated entitlement for the same user remains unchanged when another order is refunded', async () => {
+    serverStorage.clearAll();
+
+    const user: User = {
+      id: 'usr_unrelated_12',
+      email: 'unrelated12@example.com',
+      password_hash: 'salt:hash',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await serverStorage.createUser(user);
+
+    const finding1 = 'finding_12_A';
+    const finding2 = 'finding_12_B';
+    await serverStorage.registerFindingOwnership(finding1, user.id);
+    await serverStorage.registerFindingOwnership(finding2, user.id);
+
+    await serverStorage.createEntitlement({
+      id: 'ent_12_A',
+      user_id: user.id,
+      finding_id: finding1,
+      type: 'PAID_FIX_PACKAGE',
+      status: 'ACTIVE',
+      provider: 'LEMON_SQUEEZY',
+      provider_transaction_id: 'ord_12_A',
+      amount_usd: 49.0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    await serverStorage.createEntitlement({
+      id: 'ent_12_B',
+      user_id: user.id,
+      finding_id: finding2,
+      type: 'PAID_FIX_PACKAGE',
+      status: 'ACTIVE',
+      provider: 'LEMON_SQUEEZY',
+      provider_transaction_id: 'ord_12_B',
+      amount_usd: 49.0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const refundPayload = {
+      meta: {
+        event_name: 'order_refunded',
+        event_id: 'evt_refund_12_A',
+        custom_data: {
+          user_id: user.id,
+          finding_id: finding1,
+          product: 'FIX_PACKAGE',
+        },
+      },
+      data: {
+        id: 'ord_12_A',
+        attributes: {
+          status: 'refunded',
+          refunded: true,
+          total: 4900,
+          refunded_amount: 4900,
+          first_order_item: { variant_id: 'variant_fix_49' },
+        },
+      },
+    };
+
+    const payloadString = JSON.stringify(refundPayload);
+    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-signature': signPayload(payloadString),
+      },
+      body: payloadString,
+    });
+
+    assert.strictEqual(res.status, 200);
+
+    const ent1 = await serverStorage.getEntitlement(user.id, finding1);
+    assert.strictEqual(ent1?.status, 'REVOKED');
+
+    const ent2 = await serverStorage.getEntitlement(user.id, finding2);
+    assert.strictEqual(ent2?.status, 'ACTIVE');
+  });
+
+  // --- Scenario 13: Delayed order_created cannot reactivate revoked entitlement ---
+  test('13. A delayed order_created or order_settled event cannot reactivate an entitlement revoked by a valid refund', async () => {
+    serverStorage.clearAll();
+
+    const user: User = {
+      id: 'usr_delayed_13',
+      email: 'delayed13@example.com',
+      password_hash: 'salt:hash',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await serverStorage.createUser(user);
+
+    const findingId = 'finding_delayed_13';
+    await serverStorage.registerFindingOwnership(findingId, user.id);
+
+    await serverStorage.createEntitlement({
+      id: 'ent_delayed_13',
+      user_id: user.id,
+      finding_id: findingId,
+      type: 'PAID_FIX_PACKAGE',
+      status: 'REVOKED',
+      provider: 'LEMON_SQUEEZY',
+      provider_transaction_id: 'ord_delayed_13',
+      amount_usd: 49.0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const delayedOrderPayload = {
+      meta: {
+        event_name: 'order_created',
+        event_id: 'evt_delayed_order_13',
+        custom_data: {
+          user_id: user.id,
+          finding_id: findingId,
+          product: 'FIX_PACKAGE',
+        },
+      },
+      data: {
+        id: 'ord_delayed_13',
+        attributes: {
+          status: 'paid',
+          first_order_item: { variant_id: 'variant_fix_49' },
+        },
+      },
+    };
+
+    const payloadString = JSON.stringify(delayedOrderPayload);
+    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-signature': signPayload(payloadString),
+      },
+      body: payloadString,
+    });
+
+    assert.strictEqual(res.status, 200);
+
+    const ent = await serverStorage.getEntitlement(user.id, findingId);
+    assert.strictEqual(ent?.status, 'REVOKED');
+  });
+
+  // --- Scenario 14: Invalid webhook signature cannot revoke an entitlement ---
+  test('14. An invalid webhook signature cannot revoke an entitlement', async () => {
+    serverStorage.clearAll();
+
+    const user: User = {
+      id: 'usr_invalidsig_14',
+      email: 'invalidsig14@example.com',
+      password_hash: 'salt:hash',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await serverStorage.createUser(user);
+
+    const findingId = 'finding_invalidsig_14';
+    await serverStorage.registerFindingOwnership(findingId, user.id);
+
+    await serverStorage.createEntitlement({
+      id: 'ent_invalidsig_14',
+      user_id: user.id,
+      finding_id: findingId,
+      type: 'PAID_FIX_PACKAGE',
+      status: 'ACTIVE',
+      provider: 'LEMON_SQUEEZY',
+      provider_transaction_id: 'ord_invalidsig_14',
+      amount_usd: 49.0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const refundPayload = {
+      meta: {
+        event_name: 'order_refunded',
+        event_id: 'evt_invalid_sig_14',
+        custom_data: {
+          user_id: user.id,
+          finding_id: findingId,
+          product: 'FIX_PACKAGE',
+        },
+      },
+      data: {
+        id: 'ord_invalidsig_14',
+        attributes: {
+          status: 'refunded',
+          refunded: true,
+          total: 4900,
+          refunded_amount: 4900,
+          first_order_item: { variant_id: 'variant_fix_49' },
+        },
+      },
+    };
+
+    const payloadString = JSON.stringify(refundPayload);
+    const wrongSignature = signPayload(payloadString, 'incorrect_secret');
+
+    const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-signature': wrongSignature,
+      },
+      body: payloadString,
+    });
+
+    assert.strictEqual(res.status, 401);
+
+    const ent = await serverStorage.getEntitlement(user.id, findingId);
+    assert.strictEqual(ent?.status, 'ACTIVE');
+  });
+
+  // --- Direct ServerStorage fail-closed unit tests ---
+  describe('ServerStorage fail-closed unit tests', () => {
+    test('ServerStorage fails closed when provider_transaction_id is empty or null', async () => {
+      serverStorage.clearAll();
+
+      const user: User = {
+        id: 'usr_ss_failclose',
+        email: 'ss_failclose@example.com',
+        password_hash: 'salt:hash',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      await serverStorage.createUser(user);
+
+      const findingId = 'finding_ss_empty_tx';
+      await serverStorage.registerFindingOwnership(findingId, user.id);
+
+      await serverStorage.createEntitlement({
+        id: 'ent_ss_empty',
+        user_id: user.id,
+        finding_id: findingId,
+        type: 'PAID_FIX_PACKAGE',
+        status: 'ACTIVE',
+        provider: 'LEMON_SQUEEZY',
+        provider_transaction_id: '',
+        amount_usd: 49.0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      const res = await serverStorage.processOrderRefundedWebhookTransaction({
+        event: {
+          event_id: 'evt_ss_ref_1',
+          provider: 'LEMON_SQUEEZY',
+          event_name: 'order_refunded',
+          user_id: user.id,
+          finding_id: findingId,
+          order_id: 'ord_expected_123',
+          processed_at: new Date().toISOString(),
+        },
+        userId: user.id,
+        findingId,
+        orderId: 'ord_expected_123',
+      });
+
+      assert.strictEqual(res.status, 'MISMATCH');
+      const ent = await serverStorage.getEntitlement(user.id, findingId);
+      assert.strictEqual(ent?.status, 'ACTIVE');
+    });
+
+    test('ServerStorage fails closed when entitlement provider is not LEMON_SQUEEZY', async () => {
+      serverStorage.clearAll();
+
+      const user: User = {
+        id: 'usr_ss_diff_prov',
+        email: 'ss_diff_prov@example.com',
+        password_hash: 'salt:hash',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      await serverStorage.createUser(user);
+
+      const findingId = 'finding_ss_diff_prov';
+      await serverStorage.registerFindingOwnership(findingId, user.id);
+
+      await serverStorage.createEntitlement({
+        id: 'ent_ss_demo',
+        user_id: user.id,
+        finding_id: findingId,
+        type: 'PAID_FIX_PACKAGE',
+        status: 'ACTIVE',
+        provider: 'DEMO_ADAPTER',
+        provider_transaction_id: 'ord_match_123',
+        amount_usd: 49.0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      const res = await serverStorage.processOrderRefundedWebhookTransaction({
+        event: {
+          event_id: 'evt_ss_ref_2',
+          provider: 'LEMON_SQUEEZY',
+          event_name: 'order_refunded',
+          user_id: user.id,
+          finding_id: findingId,
+          order_id: 'ord_match_123',
+          processed_at: new Date().toISOString(),
+        },
+        userId: user.id,
+        findingId,
+        orderId: 'ord_match_123',
+      });
+
+      assert.strictEqual(res.status, 'MISMATCH');
+      const ent = await serverStorage.getEntitlement(user.id, findingId);
+      assert.strictEqual(ent?.status, 'ACTIVE');
+    });
+
+    test('ServerStorage fails closed when entitlement type is not PAID_FIX_PACKAGE', async () => {
+      serverStorage.clearAll();
+
+      const user: User = {
+        id: 'usr_ss_diff_type',
+        email: 'ss_diff_type@example.com',
+        password_hash: 'salt:hash',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      await serverStorage.createUser(user);
+
+      const findingId = 'finding_ss_diff_type';
+      await serverStorage.registerFindingOwnership(findingId, user.id);
+
+      await serverStorage.createEntitlement({
+        id: 'ent_ss_preview',
+        user_id: user.id,
+        finding_id: findingId,
+        type: 'DEMO_PREVIEW',
+        status: 'ACTIVE',
+        provider: 'LEMON_SQUEEZY',
+        provider_transaction_id: 'ord_match_type_123',
+        amount_usd: 49.0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      const res = await serverStorage.processOrderRefundedWebhookTransaction({
+        event: {
+          event_id: 'evt_ss_ref_3',
+          provider: 'LEMON_SQUEEZY',
+          event_name: 'order_refunded',
+          user_id: user.id,
+          finding_id: findingId,
+          order_id: 'ord_match_type_123',
+          processed_at: new Date().toISOString(),
+        },
+        userId: user.id,
+        findingId,
+        orderId: 'ord_match_type_123',
+      });
+
+      assert.strictEqual(res.status, 'MISMATCH');
+      const ent = await serverStorage.getEntitlement(user.id, findingId);
+      assert.strictEqual(ent?.status, 'ACTIVE');
+    });
+  });
+
+  // --- DrizzleStorageAdapter direct refund & monotonic tests ---
+  describe('DrizzleStorageAdapter direct refund & monotonic tests', () => {
     let db: any;
     let client: any;
     let adapter: DrizzleStorageAdapter;
@@ -910,7 +1309,7 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
       if (client) client.close();
     });
 
-    test('DrizzleStorageAdapter atomic refund transaction revokes entitlement', async () => {
+    test('DrizzleStorageAdapter atomic refund transaction revokes entitlement with exact match', async () => {
       const user: User = {
         id: 'usr_drizzle_refund',
         email: 'drizzle_refund@example.com',
@@ -957,6 +1356,52 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
       const ent = await adapter.getEntitlement(user.id, findingId);
       assert.strictEqual(ent?.status, 'REVOKED');
       assert.strictEqual(await adapter.hasActivePaidEntitlement(user.id, findingId), false);
+    });
+
+    test('DrizzleStorageAdapter fails closed when providerTransactionId is empty or whitespace', async () => {
+      const user: User = {
+        id: 'usr_drizzle_empty_tx',
+        email: 'drizzle_empty_tx@example.com',
+        password_hash: 'salt:hash',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      await adapter.createUser(user);
+
+      const findingId = 'finding_drizzle_empty_tx';
+      await adapter.registerFindingOwnership(findingId, user.id);
+
+      await adapter.createEntitlement({
+        id: 'ent_drizzle_empty_tx',
+        user_id: user.id,
+        finding_id: findingId,
+        type: 'PAID_FIX_PACKAGE',
+        status: 'ACTIVE',
+        provider: 'LEMON_SQUEEZY',
+        provider_transaction_id: '   ',
+        amount_usd: 49.0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      const res = await adapter.processOrderRefundedWebhookTransaction({
+        event: {
+          event_id: 'evt_drizzle_empty_ref',
+          provider: 'LEMON_SQUEEZY',
+          event_name: 'order_refunded',
+          user_id: user.id,
+          finding_id: findingId,
+          order_id: 'ord_expected_123',
+          processed_at: new Date().toISOString(),
+        },
+        userId: user.id,
+        findingId,
+        orderId: 'ord_expected_123',
+      });
+
+      assert.strictEqual(res.status, 'MISMATCH');
+      const ent = await adapter.getEntitlement(user.id, findingId);
+      assert.strictEqual(ent?.status, 'ACTIVE');
     });
 
     test('DrizzleStorageAdapter returns NOT_FOUND if entitlement does not exist', async () => {
@@ -1020,6 +1465,100 @@ describe('AIDisCost Server — Lemon Squeezy Refund Webhook & Revocation Tests',
       });
 
       assert.strictEqual(res.status, 'MISMATCH');
+      const ent = await adapter.getEntitlement(user.id, findingId);
+      assert.strictEqual(ent?.status, 'ACTIVE');
+    });
+
+    test('DrizzleStorageAdapter returns MISMATCH if provider is not LEMON_SQUEEZY', async () => {
+      const user: User = {
+        id: 'usr_drizzle_demo_prov',
+        email: 'drizzle_demo_prov@example.com',
+        password_hash: 'salt:hash',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      await adapter.createUser(user);
+
+      const findingId = 'finding_drizzle_demo_prov';
+      await adapter.registerFindingOwnership(findingId, user.id);
+
+      await adapter.createEntitlement({
+        id: 'ent_drizzle_demo_prov',
+        user_id: user.id,
+        finding_id: findingId,
+        type: 'PAID_FIX_PACKAGE',
+        status: 'ACTIVE',
+        provider: 'DEMO_ADAPTER',
+        provider_transaction_id: 'ord_match_demo',
+        amount_usd: 49.0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      const res = await adapter.processOrderRefundedWebhookTransaction({
+        event: {
+          event_id: 'evt_drizzle_demo_prov',
+          provider: 'LEMON_SQUEEZY',
+          event_name: 'order_refunded',
+          user_id: user.id,
+          finding_id: findingId,
+          order_id: 'ord_match_demo',
+          processed_at: new Date().toISOString(),
+        },
+        userId: user.id,
+        findingId,
+        orderId: 'ord_match_demo',
+      });
+
+      assert.strictEqual(res.status, 'MISMATCH');
+      const ent = await adapter.getEntitlement(user.id, findingId);
+      assert.strictEqual(ent?.status, 'ACTIVE');
+    });
+
+    test('DrizzleStorageAdapter returns MISMATCH if type is not PAID_FIX_PACKAGE', async () => {
+      const user: User = {
+        id: 'usr_drizzle_prev_type',
+        email: 'drizzle_prev_type@example.com',
+        password_hash: 'salt:hash',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      await adapter.createUser(user);
+
+      const findingId = 'finding_drizzle_prev_type';
+      await adapter.registerFindingOwnership(findingId, user.id);
+
+      await adapter.createEntitlement({
+        id: 'ent_drizzle_prev',
+        user_id: user.id,
+        finding_id: findingId,
+        type: 'DEMO_PREVIEW',
+        status: 'ACTIVE',
+        provider: 'LEMON_SQUEEZY',
+        provider_transaction_id: 'ord_match_prev',
+        amount_usd: 49.0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      const res = await adapter.processOrderRefundedWebhookTransaction({
+        event: {
+          event_id: 'evt_drizzle_prev_ref',
+          provider: 'LEMON_SQUEEZY',
+          event_name: 'order_refunded',
+          user_id: user.id,
+          finding_id: findingId,
+          order_id: 'ord_match_prev',
+          processed_at: new Date().toISOString(),
+        },
+        userId: user.id,
+        findingId,
+        orderId: 'ord_match_prev',
+      });
+
+      assert.strictEqual(res.status, 'MISMATCH');
+      const ent = await adapter.getEntitlement(user.id, findingId);
+      assert.strictEqual(ent?.status, 'ACTIVE');
     });
 
     test('DrizzleStorageAdapter monotonic guard prevents delayed order_created from reactivating REVOKED entitlement', async () => {

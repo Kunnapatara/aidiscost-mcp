@@ -725,7 +725,17 @@ export class DrizzleStorageAdapter implements IStorage {
         }
 
         const existing = existingEntitlementRows[0];
-        if (existing.providerTransactionId && existing.providerTransactionId !== params.orderId) {
+
+        // Fail closed: enforce exact transaction ID, provider, type, and eligible status
+        const hasValidTransactionId = Boolean(
+          existing.providerTransactionId && existing.providerTransactionId.trim() !== ''
+        );
+        const matchesOrder = hasValidTransactionId && existing.providerTransactionId === params.orderId;
+        const matchesProvider = existing.provider === 'LEMON_SQUEEZY';
+        const matchesType = existing.type === 'PAID_FIX_PACKAGE';
+        const isEligibleStatus = existing.status === 'ACTIVE';
+
+        if (!matchesOrder || !matchesProvider || !matchesType || !isEligibleStatus) {
           this.inFlightWebhooks.delete(params.event.event_id);
           return {
             status: 'MISMATCH',
@@ -736,7 +746,45 @@ export class DrizzleStorageAdapter implements IStorage {
               type: existing.type as any,
               status: existing.status as any,
               provider: existing.provider as any,
-              provider_transaction_id: existing.providerTransactionId,
+              provider_transaction_id: existing.providerTransactionId || '',
+              amount_usd: existing.amountUsd,
+              created_at: existing.createdAt,
+              updated_at: existing.updatedAt,
+            },
+          };
+        }
+
+        const now = new Date().toISOString();
+        const updateResult = await tx
+          .update(schema.entitlements)
+          .set({
+            status: 'REVOKED',
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.entitlements.id, existing.id),
+              eq(schema.entitlements.userId, params.userId),
+              eq(schema.entitlements.findingId, params.findingId),
+              eq(schema.entitlements.providerTransactionId, params.orderId),
+              eq(schema.entitlements.provider, 'LEMON_SQUEEZY'),
+              eq(schema.entitlements.type, 'PAID_FIX_PACKAGE'),
+              eq(schema.entitlements.status, 'ACTIVE')
+            )
+          );
+
+        if ((updateResult.rowsAffected ?? 0) === 0) {
+          this.inFlightWebhooks.delete(params.event.event_id);
+          return {
+            status: 'MISMATCH',
+            entitlement: {
+              id: existing.id,
+              user_id: existing.userId,
+              finding_id: existing.findingId,
+              type: existing.type as any,
+              status: existing.status as any,
+              provider: existing.provider as any,
+              provider_transaction_id: existing.providerTransactionId || '',
               amount_usd: existing.amountUsd,
               created_at: existing.createdAt,
               updated_at: existing.updatedAt,
@@ -753,20 +801,6 @@ export class DrizzleStorageAdapter implements IStorage {
           orderId: params.event.order_id,
           processedAt: params.event.processed_at,
         });
-
-        const now = new Date().toISOString();
-        await tx
-          .update(schema.entitlements)
-          .set({
-            status: 'REVOKED',
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.entitlements.userId, params.userId),
-              eq(schema.entitlements.findingId, params.findingId)
-            )
-          );
 
         this.processedWebhooksCache.add(params.event.event_id);
         this.inFlightWebhooks.delete(params.event.event_id);
