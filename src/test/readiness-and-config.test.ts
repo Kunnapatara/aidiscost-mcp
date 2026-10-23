@@ -166,6 +166,55 @@ describe('AIDisCost — Production Readiness Verification Suite', () => {
       assert.strictEqual(jsonBroken.database, 'disconnected');
     });
 
+    test('GET /api/health returns 503 Service Unavailable when storage.checkReadiness is missing or not a function', async () => {
+      const noReadinessStorage: any = {
+        ...testStorage,
+        checkReadiness: undefined,
+      };
+      setStorage(noReadinessStorage);
+
+      const res = await fetch(`${serverUrl}/api/health`);
+      assert.strictEqual(res.status, 503);
+
+      const json: any = await res.json();
+      assert.strictEqual(json.status, 'error');
+      assert.strictEqual(json.database, 'disconnected');
+      assert.strictEqual(json.stack, undefined);
+    });
+
+    test('GET /api/health/ready returns 503 when storage.checkReadiness is missing or not a function', async () => {
+      const noReadinessStorage: any = {
+        ...testStorage,
+        checkReadiness: undefined,
+      };
+      setStorage(noReadinessStorage);
+
+      const res = await fetch(`${serverUrl}/api/health/ready`);
+      assert.strictEqual(res.status, 503);
+
+      const json: any = await res.json();
+      assert.strictEqual(json.status, 'unavailable');
+      assert.strictEqual(json.database, 'disconnected');
+    });
+
+    test('GET /api/health/ready returns 503 when checkReadiness throws an error', async () => {
+      const errorStorage: any = {
+        ...testStorage,
+        checkReadiness: async () => {
+          throw new Error('DATABASE_CONNECTION_RESET');
+        },
+      };
+      setStorage(errorStorage);
+
+      const res = await fetch(`${serverUrl}/api/health/ready`);
+      assert.strictEqual(res.status, 503);
+
+      const json: any = await res.json();
+      assert.strictEqual(json.status, 'unavailable');
+      assert.strictEqual(json.database, 'disconnected');
+      assert.strictEqual(JSON.stringify(json).includes('DATABASE_CONNECTION_RESET'), false);
+    });
+
     test('DrizzleStorageAdapter.checkReadiness executes lightweight SELECT 1 query', async () => {
       const conn = createDatabaseConnection({ url: ':memory:' });
       await initializeDatabaseSchema(conn.client);
@@ -480,6 +529,247 @@ describe('AIDisCost — Production Readiness Verification Suite', () => {
       assert.strictEqual(res2.status, 200);
       const body2: any = await res2.json();
       assert.strictEqual(body2.status, 'IDEMPOTENT_DUPLICATE');
+    });
+  });
+
+  // =========================================================================
+  // Finding 3: Fix Package Webhook Variant Configuration Fail-Closed
+  // =========================================================================
+  describe('Finding 3: Fix Package Webhook Variant Configuration Fail-Closed', () => {
+    const fixUser: User = {
+      id: 'usr_fix_pkg_conf_01',
+      email: 'fix-user@example.com',
+      password_hash: 'salt:hash',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const fixFindingId = 'finding_fix_pkg_variant_01';
+
+    beforeEach(async () => {
+      await testStorage.createUser(fixUser);
+      await testStorage.registerFindingOwnership(fixFindingId, fixUser.id);
+    });
+
+    test('1. Fix Package variant configuration is missing -> fails closed with 503 FIX_PACKAGE_NOT_CONFIGURED', async () => {
+      delete process.env.LEMON_SQUEEZY_VARIANT_ID;
+
+      const payload = {
+        meta: {
+          event_name: 'order_created',
+          event_id: 'evt_fix_missing_conf_01',
+          custom_data: {
+            user_id: fixUser.id,
+            finding_id: fixFindingId,
+            product: 'FIX_PACKAGE',
+          },
+        },
+        data: {
+          id: 'ord_fix_missing_01',
+          attributes: {
+            status: 'paid',
+            total: 4900,
+            first_order_item: {
+              variant_id: 'any_variant_id',
+            },
+          },
+        },
+      };
+
+      const payloadStr = JSON.stringify(payload);
+      const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-signature': signPayload(payloadStr),
+        },
+        body: payloadStr,
+      });
+
+      assert.strictEqual(res.status, 503);
+      const body: any = await res.json();
+      assert.strictEqual(body.error, 'FIX_PACKAGE_NOT_CONFIGURED');
+
+      // Entitlement must NOT be created
+      const hasEntitlement = await testStorage.hasActivePaidEntitlement(fixUser.id, fixFindingId);
+      assert.strictEqual(hasEntitlement, false);
+    });
+
+    test('2. Fix Package variant configuration is an empty string -> fails closed with 503 FIX_PACKAGE_NOT_CONFIGURED', async () => {
+      process.env.LEMON_SQUEEZY_VARIANT_ID = '   ';
+
+      const payload = {
+        meta: {
+          event_name: 'order_created',
+          event_id: 'evt_fix_empty_conf_01',
+          custom_data: {
+            user_id: fixUser.id,
+            finding_id: fixFindingId,
+            product: 'FIX_PACKAGE',
+          },
+        },
+        data: {
+          id: 'ord_fix_empty_01',
+          attributes: {
+            status: 'paid',
+            total: 4900,
+            first_order_item: {
+              variant_id: 'some_variant_id',
+            },
+          },
+        },
+      };
+
+      const payloadStr = JSON.stringify(payload);
+      const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-signature': signPayload(payloadStr),
+        },
+        body: payloadStr,
+      });
+
+      assert.strictEqual(res.status, 503);
+      const body: any = await res.json();
+      assert.strictEqual(body.error, 'FIX_PACKAGE_NOT_CONFIGURED');
+
+      const hasEntitlement = await testStorage.hasActivePaidEntitlement(fixUser.id, fixFindingId);
+      assert.strictEqual(hasEntitlement, false);
+    });
+
+    test('3. Incoming variant ID does not match configured ID -> rejected with 400 WRONG_VARIANT', async () => {
+      process.env.LEMON_SQUEEZY_VARIANT_ID = 'var_fix_pkg_49';
+
+      const payload = {
+        meta: {
+          event_name: 'order_created',
+          event_id: 'evt_fix_wrong_var_01',
+          custom_data: {
+            user_id: fixUser.id,
+            finding_id: fixFindingId,
+            product: 'FIX_PACKAGE',
+          },
+        },
+        data: {
+          id: 'ord_fix_wrong_var_01',
+          attributes: {
+            status: 'paid',
+            total: 4900,
+            first_order_item: {
+              variant_id: 'var_unrecognized_variant_999',
+            },
+          },
+        },
+      };
+
+      const payloadStr = JSON.stringify(payload);
+      const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-signature': signPayload(payloadStr),
+        },
+        body: payloadStr,
+      });
+
+      assert.strictEqual(res.status, 400);
+      const body: any = await res.json();
+      assert.strictEqual(body.error, 'WRONG_VARIANT');
+
+      const hasEntitlement = await testStorage.hasActivePaidEntitlement(fixUser.id, fixFindingId);
+      assert.strictEqual(hasEntitlement, false);
+    });
+
+    test('4. Incoming variant ID matches configured ID -> accepted with 200 SUCCESS and creates entitlement', async () => {
+      process.env.LEMON_SQUEEZY_VARIANT_ID = 'var_fix_pkg_49';
+
+      const payload = {
+        meta: {
+          event_name: 'order_created',
+          event_id: 'evt_fix_match_var_01',
+          custom_data: {
+            user_id: fixUser.id,
+            finding_id: fixFindingId,
+            product: 'FIX_PACKAGE',
+          },
+        },
+        data: {
+          id: 'ord_fix_match_var_01',
+          attributes: {
+            status: 'paid',
+            total: 4900,
+            first_order_item: {
+              variant_id: 'var_fix_pkg_49',
+            },
+          },
+        },
+      };
+
+      const payloadStr = JSON.stringify(payload);
+      const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-signature': signPayload(payloadStr),
+        },
+        body: payloadStr,
+      });
+
+      assert.strictEqual(res.status, 200);
+      const body: any = await res.json();
+      assert.strictEqual(body.status, 'SUCCESS');
+      assert.strictEqual(body.finding_id, fixFindingId);
+
+      const hasEntitlement = await testStorage.hasActivePaidEntitlement(fixUser.id, fixFindingId);
+      assert.strictEqual(hasEntitlement, true);
+    });
+
+    test('5. Validly signed webhook with missing variant configuration is not accepted as a successful purchase', async () => {
+      delete process.env.LEMON_SQUEEZY_VARIANT_ID;
+
+      const payload = {
+        meta: {
+          event_name: 'order_created',
+          event_id: 'evt_fix_valid_sig_missing_conf',
+          custom_data: {
+            user_id: fixUser.id,
+            finding_id: fixFindingId,
+            product: 'FIX_PACKAGE',
+          },
+        },
+        data: {
+          id: 'ord_fix_valid_sig_missing_conf_01',
+          attributes: {
+            status: 'paid',
+            total: 4900,
+            variant_id: 'some_incoming_variant_id',
+          },
+        },
+      };
+
+      const payloadStr = JSON.stringify(payload);
+      const validSignature = signPayload(payloadStr);
+
+      const res = await fetch(`${serverUrl}/api/webhooks/lemon-squeezy`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-signature': validSignature,
+        },
+        body: payloadStr,
+      });
+
+      // Must NOT be accepted as success (status 200)
+      assert.notStrictEqual(res.status, 200);
+      assert.strictEqual(res.status, 503);
+      const body: any = await res.json();
+      assert.strictEqual(body.error, 'FIX_PACKAGE_NOT_CONFIGURED');
+
+      const hasEntitlement = await testStorage.hasActivePaidEntitlement(fixUser.id, fixFindingId);
+      assert.strictEqual(hasEntitlement, false);
+
+      // Restore configuration
+      process.env.LEMON_SQUEEZY_VARIANT_ID = 'var_fix_pkg_49';
     });
   });
 

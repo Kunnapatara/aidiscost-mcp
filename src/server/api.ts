@@ -46,7 +46,7 @@ export function createApiRouter(): Router {
       const storage = getStorage();
       const isReady = typeof storage.checkReadiness === 'function'
         ? await storage.checkReadiness()
-        : true;
+        : false;
 
       if (!isReady) {
         res.status(503).json({
@@ -94,7 +94,7 @@ export function createApiRouter(): Router {
       const storage = getStorage();
       const isReady = typeof storage.checkReadiness === 'function'
         ? await storage.checkReadiness()
-        : true;
+        : false;
 
       if (!isReady) {
         res.status(503).json({
@@ -1004,21 +1004,29 @@ export function createApiRouter(): Router {
             return;
           }
 
-          // Strict Fix Package Variant Validation
-          if (config.variantId) {
-            const rawVariant = attributes?.first_order_item?.variant_id ?? attributes?.variant_id;
-            const incomingVariantId =
-              typeof rawVariant === 'string' || typeof rawVariant === 'number'
-                ? String(rawVariant).trim()
-                : '';
-            if (!incomingVariantId || incomingVariantId !== config.variantId) {
-              storage.releaseWebhookClaim(eventId);
-              res.status(400).json({
-                error: 'WRONG_VARIANT',
-                message: `Variant ID "${incomingVariantId}" does not match configured Fix Package variant.`,
-              });
-              return;
-            }
+          // Strict Fix Package Variant Validation (fail closed)
+          const expectedVariantId = (config.variantId || '').trim();
+          if (!expectedVariantId) {
+            storage.releaseWebhookClaim(eventId);
+            res.status(503).json({
+              error: 'FIX_PACKAGE_NOT_CONFIGURED',
+              message: 'Fix Package variant is not configured on this server.',
+            });
+            return;
+          }
+
+          const rawVariant = attributes?.first_order_item?.variant_id ?? attributes?.variant_id;
+          const incomingVariantId =
+            typeof rawVariant === 'string' || typeof rawVariant === 'number'
+              ? String(rawVariant).trim()
+              : '';
+          if (!incomingVariantId || incomingVariantId !== expectedVariantId) {
+            storage.releaseWebhookClaim(eventId);
+            res.status(400).json({
+              error: 'WRONG_VARIANT',
+              message: `Variant ID "${incomingVariantId}" does not match configured Fix Package variant.`,
+            });
+            return;
           }
 
           // Handle order_refunded event for Fix Package

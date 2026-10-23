@@ -246,6 +246,7 @@ describe('AIDisCost Server — Auth, Entitlement & Billing Tests', () => {
 
     before(async () => {
       process.env.LEMON_SQUEEZY_WEBHOOK_SECRET = webhookSecret;
+      process.env.LEMON_SQUEEZY_VARIANT_ID = 'variant_fix_pkg_49';
 
       // Register owner
       const res = await fetch(`${serverUrl}/api/auth/register`, {
@@ -298,6 +299,9 @@ describe('AIDisCost Server — Auth, Entitlement & Billing Tests', () => {
           attributes: {
             status: 'paid',
             identifier: 'ord_ident_001',
+            first_order_item: {
+              variant_id: 'variant_fix_pkg_49',
+            },
           },
         },
       };
@@ -374,6 +378,9 @@ describe('AIDisCost Server — Auth, Entitlement & Billing Tests', () => {
           attributes: {
             status: 'paid',
             identifier: 'ord_attack_01',
+            first_order_item: {
+              variant_id: 'variant_fix_pkg_49',
+            },
           },
         },
       };
