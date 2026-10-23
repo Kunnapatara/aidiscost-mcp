@@ -31,8 +31,25 @@ if (cleanupInterval.unref) {
   cleanupInterval.unref();
 }
 
+export function getClientIdentifier(req: Request): string {
+  // If request has been authenticated, key by authenticated user ID to prevent
+  // IP-rotation bypass and protect distinct users sharing a corporate NAT/proxy IP.
+  const authUser = (req as AuthenticatedRequest).user;
+  if (authUser?.id) {
+    return `user:${authUser.id}`;
+  }
+
+  // For unauthenticated/anonymous requests, use req.ip (which honors Express trust-proxy configuration safely)
+  // or fall back to the direct TCP socket remote address to prevent header spoofing.
+  return `ip:${req.ip || req.socket?.remoteAddress || 'unknown-client'}`;
+}
+
+export function resetRateLimitsForTesting(): void {
+  rateLimitMap.clear();
+}
+
 function mcpRateLimiter(req: Request, res: Response, next: NextFunction): void {
-  const clientKey = req.ip || req.socket.remoteAddress || 'unknown-client';
+  const clientKey = getClientIdentifier(req);
   const now = Date.now();
   let entry = rateLimitMap.get(clientKey);
 

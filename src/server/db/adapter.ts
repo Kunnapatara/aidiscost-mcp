@@ -961,4 +961,14 @@ export class DrizzleStorageAdapter implements IStorage {
       throw err;
     }
   }
+
+  // --- Health & Readiness Check ---
+  async checkReadiness(): Promise<boolean> {
+    try {
+      const result = await this.client.execute('SELECT 1 as healthy;');
+      return Boolean(result && Array.isArray(result.rows) && result.rows.length > 0);
+    } catch {
+      return false;
+    }
+  }
 }

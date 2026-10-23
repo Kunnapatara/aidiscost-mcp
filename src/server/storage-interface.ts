@@ -75,6 +75,9 @@ export interface IStorage {
     entitlement?: Entitlement;
   }): Promise<{ status: 'SUCCESS' | 'DUPLICATE' }>;
 
+  // --- Health & Readiness Check ---
+  checkReadiness?(): Promise<boolean>;
+
   // --- Test & Lifecycle Helpers ---
   clearAll?(): Promise<void> | void;
   setTestMode?(isTest: boolean): void;

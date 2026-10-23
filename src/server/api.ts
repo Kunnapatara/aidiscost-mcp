@@ -40,13 +40,83 @@ export function createApiRouter(): Router {
   // ==========================================
 
   // GET /api/health
+  // Primary system health & readiness check: verifies database readiness without leaking internals
   router.get('/health', async (_req: Request, res: Response): Promise<void> => {
-    res.json({
-      status: 'ok',
+    try {
+      const storage = getStorage();
+      const isReady = typeof storage.checkReadiness === 'function'
+        ? await storage.checkReadiness()
+        : true;
+
+      if (!isReady) {
+        res.status(503).json({
+          status: 'error',
+          service: 'aidiscost',
+          database: 'disconnected',
+          timestamp: new Date().toISOString(),
+          environment: process.env.NODE_ENV || 'development',
+        });
+        return;
+      }
+
+      res.status(200).json({
+        status: 'ok',
+        service: 'aidiscost',
+        database: 'connected',
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development',
+      });
+    } catch {
+      res.status(503).json({
+        status: 'error',
+        service: 'aidiscost',
+        database: 'disconnected',
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development',
+      });
+    }
+  });
+
+  // GET /api/health/live
+  // Lightweight liveness probe: returns 200 without executing database queries
+  router.get('/health/live', async (_req: Request, res: Response): Promise<void> => {
+    res.status(200).json({
+      status: 'live',
       service: 'aidiscost',
       timestamp: new Date().toISOString(),
-      environment: process.env.NODE_ENV || 'development',
     });
+  });
+
+  // GET /api/health/ready
+  // Explicit readiness probe: verifies database connectivity and returns 503 if unavailable
+  router.get('/health/ready', async (_req: Request, res: Response): Promise<void> => {
+    try {
+      const storage = getStorage();
+      const isReady = typeof storage.checkReadiness === 'function'
+        ? await storage.checkReadiness()
+        : true;
+
+      if (!isReady) {
+        res.status(503).json({
+          status: 'unavailable',
+          database: 'disconnected',
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      res.status(200).json({
+        status: 'ready',
+        database: 'connected',
+        timestamp: new Date().toISOString(),
+      });
+    } catch {
+      res.status(503).json({
+        status: 'unavailable',
+        database: 'disconnected',
+        timestamp: new Date().toISOString(),
+      });
+    }
   });
 
   // ==========================================
@@ -1223,8 +1293,18 @@ export function createApiRouter(): Router {
             return;
           }
 
-          // If Outcome Fee variant configured, must match
-          if (config.outcomeFeeVariantId && incomingVariantId !== config.outcomeFeeVariantId) {
+          // Outcome Fee variant MUST be configured on this server to accept Outcome Fee events (fail closed)
+          if (!config.outcomeFeeVariantId) {
+            storage.releaseWebhookClaim(eventId);
+            res.status(503).json({
+              error: 'OUTCOME_FEE_NOT_CONFIGURED',
+              message: 'Outcome Fee variant is not configured on this server.',
+            });
+            return;
+          }
+
+          // Exact variant match is mandatory
+          if (incomingVariantId !== config.outcomeFeeVariantId) {
             storage.releaseWebhookClaim(eventId);
             res.status(400).json({
               error: 'WRONG_VARIANT',

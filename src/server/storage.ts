@@ -411,6 +411,11 @@ export class ServerStorage implements IStorage {
     this.flushToDisk();
     return { status: 'SUCCESS' };
   }
+
+  // --- Health & Readiness Check ---
+  async checkReadiness(): Promise<boolean> {
+    return Boolean(this.data && typeof this.data.users === 'object');
+  }
 }
 
 let activeStorage: IStorage | null = null;

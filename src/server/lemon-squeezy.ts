@@ -14,6 +14,7 @@ export function getLemonSqueezyConfig(): LemonSqueezyConfig {
   const webhookSecret = (process.env.LEMON_SQUEEZY_WEBHOOK_SECRET || '').trim();
 
   const isConfigured = Boolean(apiKey && storeId && variantId && webhookSecret);
+  const isOutcomeFeeConfigured = Boolean(apiKey && storeId && outcomeFeeVariantId && webhookSecret);
 
   return {
     apiKey,
@@ -22,6 +23,7 @@ export function getLemonSqueezyConfig(): LemonSqueezyConfig {
     outcomeFeeVariantId: outcomeFeeVariantId || undefined,
     webhookSecret,
     isConfigured,
+    isOutcomeFeeConfigured,
   };
 }
 

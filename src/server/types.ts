@@ -58,6 +58,7 @@ export interface LemonSqueezyConfig {
   outcomeFeeVariantId?: string;
   webhookSecret: string;
   isConfigured: boolean;
+  isOutcomeFeeConfigured?: boolean;
 }
 
 export type OutcomeFeeStatus = 'PAYABLE' | 'CHECKOUT_CREATED' | 'PAID' | 'SETTLED' | 'FAILED';
