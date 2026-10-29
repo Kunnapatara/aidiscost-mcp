@@ -1,0 +1,608 @@
+# AIDisCost MCP — Complete Repository Audit, Technical Verification, UX Assessment & Implementation Readiness
+
+## 1. Project Context
+
+**Project:** AIDisCost MCP
+
+**GitHub Repository:** https://github.com/Kunnapatara/aidiscost-mcp
+
+This is an existing software project. Your task is to inspect, understand, and evaluate the current implementation before recommending any changes.
+
+Do not recreate the application from scratch. Do not replace existing implementations, redesign the architecture, or introduce new infrastructure without evidence that doing so is necessary.
+
+The overall objective is to make AIDisCost MCP:
+
+- Technically reliable and maintainable.
+- Secure and properly isolated between accounts.
+- Capable of producing traceable, evidence-based cost findings.
+- Able to evaluate post-fix results without overstating savings.
+- Installable and understandable by its intended users.
+- Suitable for commercial operation after the necessary tests and acceptance checks have passed.
+
+The intended product workflow is:
+
+1. Cost Audit.
+2. Finding Discovery.
+3. Finding Detail Retrieval.
+4. Fix Package Evaluation.
+5. Verification After Changes.
+6. Entitlement and Billing.
+7. Evidence-Based Outcome Assessment.
+
+The intended commercial model includes a Free Audit, a $49 Fix Package, and a 20% Outcome Fee, subject to the actual implementation and applicable commercial terms.
+
+Do not assume that these commercial features are fully implemented, correctly calculated, or operational. Inspect the current repository and distinguish implementation evidence from successful runtime behavior.
+
+**Core integrity principle:** The system must not claim that a fix succeeded, costs were saved, telemetry is authentic, or uploaded data originated from production unless the available evidence supports that specific claim.
+
+## 2. Mandatory Operating Mode — READ-ONLY ANALYSIS
+
+This phase is strictly for repository comprehension, evidence gathering, gap analysis, and recommendations.
+
+**Do not implement changes during this phase.**
+
+You must not:
+
+- Modify, create, delete, rename, or overwrite project files.
+- Implement any work package, UX improvement, or new feature.
+- Refactor, redesign, or replace the existing architecture.
+- Remove existing functionality or restart the project from scratch.
+- Install or upgrade dependencies.
+- Change package versions, scripts, configuration, environment variables, or database schemas.
+- Execute database migrations.
+- Initiate real payments, charges, refunds, or other production transactions.
+- Perform external mutations or destructive operations.
+- Commit, push, or deploy changes.
+- Claim that tests, builds, migrations, payments, or security checks passed without actual evidence.
+- Declare a feature absent based only on a partial inspection.
+- Invent files, functions, endpoints, test results, vulnerabilities, or product capabilities.
+
+You may inspect repository files, source code, Git history, configuration, tests, documentation, package metadata, and available CI results. Read-only commands may be used if the environment permits.
+
+If repository access, runtime execution, credentials, external services, or necessary files are unavailable, state the limitation explicitly.
+
+If you cannot access GitHub, do not pretend to have inspected the repository. Explain precisely what access or source material is needed to proceed.
+
+Do not request secrets or credentials in plain text.
+
+Wait for explicit authorization before implementing anything.
+
+## 3. Evidence and Reporting Standards
+
+Use the following status labels for significant findings:
+
+- **VERIFIED:** Directly supported by inspected source code, configuration, test output, documentation, or other identifiable evidence.
+- **PARTIALLY VERIFIED:** Some implementation evidence exists, but the complete behavior has not been established.
+- **NOT VERIFIED:** Available evidence is insufficient, unavailable, or has not been tested.
+- **NOT PRESENT:** A sufficiently comprehensive inspection confirms that the relevant implementation is absent.
+
+Do not use NOT PRESENT when you have only inspected a single file or a limited portion of the repository.
+
+For every significant finding, provide:
+
+1. Exact repository path or evidence source.
+2. Relevant function, class, endpoint, configuration, test, or documentation section.
+3. What the evidence establishes.
+4. What remains unknown.
+5. The verification method needed to establish the remaining behavior.
+6. The practical consequence for reliability, security, commercial operation, or usability.
+
+Clearly distinguish:
+
+- Confirmed facts.
+- Assumptions.
+- Potential risks.
+- Confirmed defects.
+- Recommendations.
+- Unverified behavior.
+
+Source-code inspection is not equivalent to runtime verification. The existence of a function, database table, API endpoint, or test file does not prove that the corresponding behavior works correctly.
+
+Do not report tests as passed unless actual execution results establish that they passed. When execution is unavailable, report the tests as not executed or pending verification.
+
+Do not invent test coverage, pass rates, security findings, or production readiness.
+
+## 4. Work Package 1 — Current-State Acceptance and Baseline Testing
+
+Inspect the existing testing infrastructure and determine how the current state can be established before future code changes.
+
+Examine:
+
+- Package scripts and dependency declarations.
+- Unit tests and integration tests.
+- MCP-specific tests.
+- Database and migration tests.
+- Authentication and authorization tests.
+- Billing and webhook tests.
+- Build and lint configuration.
+- GitHub Actions and other CI workflows.
+- Existing test results, logs, and known failures.
+
+Identify which critical behaviors are covered by existing tests and which are not.
+
+Determine how future implementation work should distinguish pre-existing failures from regressions.
+
+Prepare a baseline test plan covering the critical application workflows.
+
+During this read-only phase, do not install dependencies or claim that tests have passed unless verifiable execution results are available.
+
+## 5. Work Package 2 — Complete and Validate the MCP Tool Workflow
+
+Inspect the actual MCP server implementation and all registered tools.
+
+A previous inspection reportedly found only two registered tools in `src/server/mcp/server.ts`. Verify the current repository before drawing conclusions.
+
+Assess whether the intended workflow requires:
+
+- `get_finding_details` to retrieve Finding details, supporting evidence, assumptions, and Fix Package information.
+- `evaluate_verification` to evaluate post-fix results through MCP using the existing Verification Engine.
+- Consistent input schemas and output schemas.
+- Consistent error codes and structured JSON responses.
+- Correct behavior for `tools/list` and `tools/call`.
+- Useful errors for malformed inputs, missing records, insufficient evidence, and unauthorized requests.
+
+Inspect the actual tool registration, handlers, validation, domain logic, and response construction.
+
+Determine whether the proposed tools already exist under different names or whether existing functionality can be reused.
+
+Prefer reuse of the existing Verification Engine and domain logic. Do not introduce a parallel verification implementation without a demonstrated need.
+
+Identify how a real MCP client should be used to verify the completed workflow during a future authorized testing phase.
+
+## 6. Work Package 3 — Reliable Audit and Finding Retrieval
+
+Inspect the complete data lifecycle for Audit records and Findings.
+
+Determine:
+
+- Whether Audit results persist after a session or process ends.
+- Whether Findings can be retrieved after a session or process ends.
+- Whether users can retrieve the correct records through the actual MCP workflow.
+- Whether Audit, Finding, Owner, remediation, and Verification records have traceable relationships.
+- Whether stable identifiers are used consistently.
+- Whether duplicate Finding IDs are handled safely.
+- Whether cross-account retrieval is prevented.
+- Whether historical evidence and verification results remain available.
+
+Inspect both storage and retrieval paths. Do not conclude that persistence is missing merely because a particular table or function was not found in one file.
+
+If persistence is insufficient, recommend the smallest safe extension of the existing design. Avoid introducing duplicate storage models when existing structures can be extended.
+
+Identify the tests needed to establish persistence, retrieval, ownership enforcement, and historical traceability.
+
+## 7. Work Package 4 — Verification Integrity and Evidence Reliability
+
+Inspect the complete post-fix verification process.
+
+Determine whether:
+
+- Verification baselines are bound to server-stored Findings.
+- Client-submitted identifiers and values are validated against authoritative records.
+- Time ranges are valid and comparable.
+- Event counts, unit costs, and workload scope are validated.
+- Incomplete or incomparable data is rejected or clearly classified.
+- Duplicate records can improperly influence results.
+- Fabricated or inconsistent data can incorrectly produce a successful verification.
+- Upload metadata can incorrectly cause data to be treated as production telemetry.
+- The system distinguishes verification status from proof of realized financial savings.
+
+Keep the following concepts separate:
+
+1. **Data consistency validation:** Whether the supplied data is internally consistent and suitable for comparison.
+2. **Source authenticity verification:** Whether there is sufficient evidence that the data came from the claimed source.
+3. **Outcome verification:** Whether the evidence supports the claimed cost-saving result.
+
+Correct arithmetic does not prove that telemetry is authentic. Consistent data does not prove that savings were realized.
+
+Do not claim source authenticity unless an appropriate evidence mechanism supports that conclusion.
+
+Identify tests for fabricated, duplicated, incomplete, incomparable, and otherwise invalid evidence.
+
+Assess whether result labels and user-facing explanations accurately reflect the actual strength and limitations of the evidence.
+
+## 8. Work Package 5 — Authentication and Multi-Tenant Security
+
+Inspect the existing authentication, session management, authorization, and tenant isolation mechanisms.
+
+Examine:
+
+- Signup and login validation.
+- Password policy and abnormal authentication scenarios.
+- Session token generation, storage, validation, and expiration.
+- Whether storing session token hashes is appropriate for the current design.
+- Authentication enforcement on relevant endpoints and MCP tools.
+- Ownership checks for Findings, Audit records, Entitlements, and Verification records.
+- Cross-account access attempts.
+- Rate limiting and behavior in multi-instance deployment.
+- Error handling and sensitive information in logs.
+- Secrets and credentials in configuration or responses.
+
+Existing authentication and rate-limiting mechanisms were reportedly found in an earlier inspection. Verify their actual implementation before proposing replacements.
+
+Distinguish confirmed vulnerabilities from potential risks that still require testing.
+
+Do not automatically replace existing authentication or session mechanisms. Explain the concrete security weakness and the least disruptive corrective approach if a weakness is established.
+
+Prepare tests for unauthorized access, cross-tenant access, invalid sessions, and relevant abuse scenarios.
+
+## 9. Work Package 6 — Payment, Webhooks, Entitlements, and Outcome Fee
+
+Inspect the actual billing and entitlement implementation.
+
+Determine whether the system correctly supports the intended commercial model, including:
+
+- Free Audit.
+- Checkout for the $49 Fix Package.
+- Server-side calculation of the 20% Outcome Fee.
+- Payment status and transaction records.
+- Webhook signature verification.
+- Idempotent processing of duplicate webhook events.
+- Delayed or out-of-order webhook events.
+- Retry behavior.
+- Refund handling.
+- Entitlement activation, expiration, and revocation.
+- Consistency between payment state and granted access.
+- Customer-visible explanations of pricing and fee calculations.
+
+Verify whether fee calculations use trustworthy server-side data and whether the basis for calculating an Outcome Fee is explicitly defined and supported by evidence.
+
+Do not assume that a successful Checkout session proves that payment processing, entitlement changes, or fee calculations are correct.
+
+Identify the Sandbox tests needed to establish correct end-to-end behavior.
+
+Do not initiate real charges, refunds, or production transactions during this analysis phase.
+
+## 10. Work Package 7 — Database, Migrations, and Production Readiness
+
+Inspect the database architecture, migration runner, repository abstractions, configuration, and production startup behavior.
+
+Determine:
+
+- Which database and storage implementations are actually used.
+- How database connections and credentials are configured.
+- Whether Turso URL and authentication token handling are correct.
+- How migrations are discovered and executed.
+- Whether migration ordering is safe.
+- Whether startup handles missing tables or schema incompatibility correctly.
+- Whether health and readiness checks reflect actual database availability.
+- Whether production can silently fall back to file or in-memory storage.
+- Whether existing data can be preserved during future migrations.
+- Whether error messages expose sensitive database information.
+
+A previous inspection reportedly found a Migration Runner and production protections against file-storage fallback. Verify the current code and available runtime evidence.
+
+Assess the migration tests needed for both an empty database and an existing database containing data.
+
+Do not run migrations or modify any database during the read-only phase.
+
+## 11. Work Package 8 — Integration, Regression, and Installation Documentation
+
+Inspect the end-to-end workflows and documentation.
+
+Assess whether the repository supports a complete and testable path through:
+
+1. MCP client connection.
+2. Authentication, where required.
+3. Cost Audit.
+4. Finding discovery.
+5. Finding detail retrieval.
+6. Fix Package evaluation.
+7. Post-fix verification.
+8. Entitlement and billing checks.
+9. Evidence-based outcome assessment.
+
+Review test coverage for:
+
+- Unauthorized requests.
+- Cross-tenant access.
+- Malformed input.
+- Oversized payloads.
+- Missing or incomplete evidence.
+- Duplicate records and webhook events.
+- Billing and entitlement consistency.
+- Verification failure and inconclusive outcomes.
+- Database failure and migration behavior.
+
+Inspect all relevant documentation, including README files, setup instructions, environment variables, migration instructions, MCP client configuration, troubleshooting, and package metadata.
+
+A previous inspection reportedly did not locate a root-level `README.md` at the checked path. Recheck the current repository before concluding that documentation is absent.
+
+Review the `react-example` package name only if it is present and demonstrably inappropriate for the actual product.
+
+Documentation must support the intended audience, not just developers who already understand the repository.
+
+## 12. Additional Workstream — UX, Onboarding, and Usability
+
+Assess whether the existing product can be used effectively by a business user who is not an experienced developer.
+
+Do not assume a new dashboard, web interface, help center, or major feature is necessary.
+
+First inspect the actual interfaces, MCP tool descriptions, response schemas, API or CLI entry points, error messages, setup instructions, and existing user-facing workflows.
+
+Recommend the smallest changes that materially improve usability while preserving completed work and the current architecture.
+
+### UX-1 — Easy First-Time Setup
+
+Determine whether a new user can follow clear instructions from MCP client configuration to a successful first cost audit.
+
+Inspect:
+
+- Prerequisites and supported environments.
+- Required environment variables and credentials.
+- MCP client configuration.
+- Authentication and connection steps.
+- Instructions for running the first audit.
+- Expected successful output.
+- Common errors and troubleshooting instructions.
+
+Assess whether instructions are understandable to non-developers and whether users must guess missing steps.
+
+Recommend improvements only where supported by actual evidence.
+
+### UX-2 — Understandable Audit Results
+
+Determine whether users can understand a Finding without reading source code.
+
+Assess whether the actual output explains:
+
+- What the problem is.
+- What evidence supports it.
+- The potential financial impact, where supported by the available data.
+- Confidence level and assessment limitations, if implemented.
+- What remains unknown or NOT VERIFIED.
+- Why the finding matters to the user's costs or operations.
+
+Do not invent financial impact, confidence scores, evidence, or calculations that the system does not implement.
+
+If a confidence level is not calculated by the system, do not recommend presenting an invented numerical confidence score as if it were measured.
+
+### UX-3 — Clear Next Actions
+
+Determine whether users know what to do after an audit.
+
+Assess whether recommendations are:
+
+- Prioritized according to defensible criteria.
+- Specific and actionable.
+- Linked to the relevant Finding.
+- Clear about required approvals and external changes.
+- Explicit about additional evidence required before a decision or verification.
+
+Distinguish recommendations from actions the system can actually execute.
+
+Do not assume automated remediation exists.
+
+### UX-4 — Continuous Finding and Verification Workflow
+
+Determine whether users can return to an existing Finding and inspect its previous evidence, remediation state, and later verification results.
+
+Assess:
+
+- Stable identifiers and relationships among Audit, Finding, remediation, and Verification records.
+- Retrieval across sessions and process restarts.
+- Availability of historical results to the correct account.
+- Whether the user must repeat the entire audit because earlier results cannot be retrieved.
+- Whether verification history distinguishes previous results from subsequent results.
+
+Do not claim this workflow is supported merely because individual database tables or functions exist.
+
+### UX-5 — Explicit and Honest System Status
+
+Determine whether the product communicates these states clearly wherever applicable:
+
+- Audit completed successfully.
+- Audit incomplete or failed.
+- Insufficient evidence.
+- Verification pending or incomplete.
+- Verification passed under the implemented criteria.
+- Claimed savings not verified.
+- Billing or entitlement pending, active, failed, or revoked.
+
+Identify ambiguous success messages, misleading status labels, missing explanations, and errors that do not provide a useful next step.
+
+Never treat a successful API response, uploaded metadata, or internally consistent calculation as proof of authentic production telemetry or realized savings.
+
+Where a status is not implemented, report the gap rather than claiming the status already exists.
+
+## 13. Required UX Assessment Format
+
+For each criterion UX-1 through UX-5, provide:
+
+1. Status: VERIFIED, PARTIALLY VERIFIED, NOT VERIFIED, or NOT PRESENT.
+2. Exact repository evidence, including file paths and relevant functions, components, endpoints, tests, or documentation.
+3. Actual user-facing behavior supported by the evidence.
+4. The usability gap and its practical impact.
+5. The smallest recommended improvement.
+6. The tests and acceptance criteria needed to confirm the improvement.
+7. Dependencies on existing work packages.
+
+Use NOT PRESENT only after sufficiently comprehensive inspection. Otherwise use NOT VERIFIED and explain the limitation.
+
+Clearly label proposed future wording or example responses as recommendations rather than existing behavior.
+
+## 14. Cross-Cutting Product Acceptance Criteria
+
+Evaluate the following end-to-end outcomes in addition to the individual work packages.
+
+### A. First-Time User Acceptance
+
+A new user should be able to:
+
+- Follow the documented setup instructions.
+- Configure a supported MCP client.
+- Authenticate if required.
+- Run an initial cost audit.
+- Understand the returned findings.
+- Identify the next recommended action.
+- Understand what remains unverified.
+
+Provide a reproducible acceptance test or clearly defined test procedure.
+
+Documentation existing in the repository is not, by itself, proof that onboarding is successful.
+
+### B. Returning User Acceptance
+
+An existing user should be able to:
+
+- Retrieve a previous Finding.
+- Inspect the original evidence.
+- Understand the current status.
+- View subsequent verification results.
+- Distinguish previous and current outcomes.
+- Access only records belonging to the authorized account.
+
+Verify persistence, traceability, and ownership enforcement.
+
+### C. Insufficient-Evidence Acceptance
+
+When evidence is missing, incomplete, incomparable, or inadequate, the system must communicate the limitation and avoid claiming that savings have been verified.
+
+A successful request or internally consistent calculation must not automatically be treated as a verified financial outcome.
+
+Define acceptance tests for inconclusive verification, invalid evidence, and unavailable source-authenticity proof.
+
+### D. Payment and Entitlement Acceptance
+
+Assess whether the product has a testable path for:
+
+- Checkout.
+- Webhook validation and idempotency.
+- Entitlement activation and revocation.
+- Refund processing where applicable.
+- Server-side fee calculation.
+- Consistency between payment state and access rights.
+- Transparent customer-facing fee explanations.
+
+Identify the evidence required to establish correct behavior in Sandbox before production transactions are authorized.
+
+### E. Error Handling and Recovery
+
+For setup, authentication, audit, verification, billing, and database errors, assess whether users receive:
+
+- A clear description of what happened.
+- An honest status.
+- A useful next step where one can be determined.
+- No exposure of secrets or sensitive internal details.
+
+Do not assume a complete error-recovery interface exists.
+
+## 15. Dependency and Implementation Readiness Analysis
+
+Assess dependencies among the eight work packages and the UX workstream.
+
+In particular, determine:
+
+- Whether a reproducible baseline is needed before code changes.
+- Whether reliable Finding persistence is required for continuous verification.
+- Whether verification integrity depends on authoritative server-side Finding records.
+- Whether payment acceptance depends on database and entitlement consistency.
+- Which UX improvements can be integrated into existing work packages.
+- Which UX improvements depend on MCP schema changes, persistence, verification, or billing.
+- Which tasks can be validated independently.
+- Which changes could duplicate or conflict with existing logic.
+- Which unknowns must be resolved before implementation can safely begin.
+
+Preserve the eight original work packages as the core plan. Explain any recommended changes to execution order and justify them with repository evidence.
+
+Do not assume all proposed tasks are missing. Identify what already exists and what must actually change.
+
+## 16. Required Final Report
+
+Return the report in this exact order.
+
+### A. Executive Summary
+
+Summarize the current state, most important verified gaps, critical unknowns, and the difference between technical readiness and user-facing usability.
+
+Do not assign an overall production-readiness score without a defined evaluation rubric and sufficient evidence.
+
+### B. Repository Structure and Architecture
+
+Document the actual repository structure, technology stack, application entry points, MCP architecture, tools, schemas, domain logic, database, migrations, tests, CI, documentation, and existing user-facing interfaces.
+
+### C. Existing Features and Evidence
+
+List the important existing capabilities and supporting evidence. Distinguish source-level implementation from runtime-verified behavior.
+
+### D. Gap Analysis — Work Packages 1–8
+
+For each package, report:
+
+- Implemented functionality.
+- Partially implemented functionality.
+- Confirmed missing functionality.
+- Unverified functionality.
+- Relevant files and evidence.
+- Required acceptance tests.
+- Dependencies and risks.
+
+### E. UX Assessment — UX-1–UX-5
+
+Assess every UX criterion using the required reporting format.
+
+Include concrete examples from actual repository evidence where available.
+
+### F. End-to-End Acceptance Test Plan
+
+Define test procedures for:
+
+- A first-time user.
+- A returning user retrieving a previous Finding.
+- A user whose verification cannot confirm savings.
+- A user encountering authentication or tenant-isolation errors.
+- A user completing a Sandbox payment flow.
+- A user encountering a database or configuration failure.
+
+Identify prerequisites, expected outcomes, failure conditions, and the evidence required to mark each test as passed.
+
+Do not claim these tests have been executed unless actual results are available.
+
+### G. Dependencies and Recommended Execution Order
+
+Explain the logical order of implementation and testing, including dependencies between technical work and UX improvements.
+
+Identify safe opportunities for parallel work without assuming that dependent tasks can be completed independently.
+
+### H. Risks, Unknowns, and Verification Blockers
+
+List confirmed defects separately from potential risks.
+
+Identify the repository access, runtime environment, Sandbox configuration, test fixtures, or other evidence needed to resolve outstanding questions.
+
+Do not request secrets in plain text.
+
+### I. Implementation Readiness
+
+For each work package and UX criterion, explain:
+
+- What is already established.
+- What remains to be verified.
+- What evidence is needed before implementation.
+- What the smallest justified scope of change would be.
+- How success should be tested and accepted.
+
+Prioritize correctness, security, evidence integrity, usability, and commercial acceptance.
+
+### J. Final Understanding Confirmation
+
+Finish with a concise confirmation that you understand:
+
+- The existing AIDisCost MCP project and its verified architecture.
+- The eight core work packages.
+- The five UX acceptance criteria.
+- The cross-cutting end-to-end tests.
+- The difference between source-code inspection and runtime verification.
+- The need to preserve existing functionality and avoid unnecessary redesign.
+- The mandatory read-only restriction.
+
+## 17. Final Constraints
+
+All conclusions must be grounded in actual repository evidence or explicitly marked as assumptions, risks, or recommendations.
+
+Do not automatically add a dashboard, rebuild the interface, introduce another database, replace existing components, or expand the scope without evidence.
+
+Do not treat code existence as proof of correct behavior. Do not treat missing tests as proof that implementation is defective. Do not treat internally consistent data as proof of authentic telemetry or realized savings.
+
+Do not include a delivery-time commitment based on assumptions. Focus on the actual repository state, the verified gaps, implementation dependencies, and objective acceptance criteria.
+
+**This task ends with the analysis and recommendations only. Do not modify files, implement changes, run migrations, initiate transactions, commit, push, deploy, or perform external mutations. Wait for explicit authorization before beginning any implementation.**
