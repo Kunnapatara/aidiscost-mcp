@@ -3,12 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { eq, and } from 'drizzle-orm';
+import { eq, and, or, desc } from 'drizzle-orm';
 import { LibSQLDatabase } from 'drizzle-orm/libsql';
 import { Client } from '@libsql/client';
 import * as schema from './schema';
 import { IStorage } from '../storage-interface';
-import { User, UserSession, Entitlement, FindingOwnership, ProcessedWebhookEvent, AuthoritativeVerification, OutcomeFeeObligation, OutcomeFeeStatus } from '../types';
+import { User, UserSession, Entitlement, FindingOwnership, ProcessedWebhookEvent, AuthoritativeVerification, OutcomeFeeObligation, OutcomeFeeStatus, PersistedAuditRecord, PersistedFindingRecord } from '../types';
+import { hashSessionToken } from '../auth';
 
 export class DrizzleStorageAdapter implements IStorage {
   private db: LibSQLDatabase<typeof schema>;
@@ -34,6 +35,8 @@ export class DrizzleStorageAdapter implements IStorage {
     await this.db.delete(schema.webhookEvents);
     await this.db.delete(schema.entitlements);
     await this.db.delete(schema.findingOwnerships);
+    await this.db.delete(schema.findings);
+    await this.db.delete(schema.audits);
     await this.db.delete(schema.sessions);
     await this.db.delete(schema.users);
   }
@@ -96,8 +99,9 @@ export class DrizzleStorageAdapter implements IStorage {
 
   // --- Session Operations ---
   async createSession(session: UserSession): Promise<UserSession> {
+    const hashedToken = hashSessionToken(session.token);
     await this.db.insert(schema.sessions).values({
-      token: session.token,
+      token: hashedToken,
       userId: session.user_id,
       expiresAt: session.expires_at,
       createdAt: session.created_at,
@@ -108,11 +112,24 @@ export class DrizzleStorageAdapter implements IStorage {
   async getSession(token: string): Promise<{ session: UserSession; user: User } | null> {
     if (!token) return null;
 
-    const rows = await this.db
+    const hashedToken = hashSessionToken(token);
+    let rows = await this.db
       .select()
       .from(schema.sessions)
-      .where(eq(schema.sessions.token, token))
+      .where(eq(schema.sessions.token, hashedToken))
       .limit(1);
+
+    let isLegacy = false;
+    if (!rows[0]) {
+      rows = await this.db
+        .select()
+        .from(schema.sessions)
+        .where(eq(schema.sessions.token, token))
+        .limit(1);
+      if (rows[0]) {
+        isLegacy = true;
+      }
+    }
 
     if (!rows[0]) return null;
 
@@ -120,6 +137,14 @@ export class DrizzleStorageAdapter implements IStorage {
     if (new Date(rows[0].expiresAt).getTime() < Date.now()) {
       await this.deleteSession(token);
       return null;
+    }
+
+    // Migrate legacy session to hashed token
+    if (isLegacy) {
+      await this.db
+        .update(schema.sessions)
+        .set({ token: hashedToken })
+        .where(eq(schema.sessions.token, token));
     }
 
     const user = await this.getUserById(rows[0].userId);
@@ -130,7 +155,7 @@ export class DrizzleStorageAdapter implements IStorage {
 
     return {
       session: {
-        token: rows[0].token,
+        token: isLegacy ? hashedToken : rows[0].token,
         user_id: rows[0].userId,
         expires_at: rows[0].expiresAt,
         created_at: rows[0].createdAt,
@@ -140,7 +165,11 @@ export class DrizzleStorageAdapter implements IStorage {
   }
 
   async deleteSession(token: string): Promise<boolean> {
-    const res = await this.db.delete(schema.sessions).where(eq(schema.sessions.token, token));
+    if (!token) return false;
+    const hashedToken = hashSessionToken(token);
+    const res = await this.db
+      .delete(schema.sessions)
+      .where(or(eq(schema.sessions.token, hashedToken), eq(schema.sessions.token, token)));
     return (res.rowsAffected ?? 0) > 0;
   }
 
@@ -960,6 +989,196 @@ export class DrizzleStorageAdapter implements IStorage {
       this.processedWebhooksCache.delete(params.event.event_id);
       throw err;
     }
+  }
+
+  // --- Audit and Finding Operations ---
+  async saveAudit(audit: PersistedAuditRecord): Promise<PersistedAuditRecord> {
+    await this.db
+      .insert(schema.audits)
+      .values({
+        id: audit.audit_id,
+        userId: audit.user_id,
+        source: audit.source,
+        totalSpendUsd: audit.total_spend_usd,
+        potentialSavingsUsd: audit.potential_savings_usd,
+        annualizedSavingsProjectionUsd: audit.annualized_savings_projection_usd,
+        isSampleData: audit.is_sample_data,
+        healthGrade: audit.health_grade ?? null,
+        healthReportJson: audit.health_report ? JSON.stringify(audit.health_report) : null,
+        findingsCount: audit.findings_count,
+        createdAt: audit.created_at,
+      })
+      .onConflictDoUpdate({
+        target: schema.audits.id,
+        set: {
+          source: audit.source,
+          totalSpendUsd: audit.total_spend_usd,
+          potentialSavingsUsd: audit.potential_savings_usd,
+          annualizedSavingsProjectionUsd: audit.annualized_savings_projection_usd,
+          isSampleData: audit.is_sample_data,
+          healthGrade: audit.health_grade ?? null,
+          healthReportJson: audit.health_report ? JSON.stringify(audit.health_report) : null,
+          findingsCount: audit.findings_count,
+        },
+      });
+
+    return audit;
+  }
+
+  async getAudit(auditId: string): Promise<PersistedAuditRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(schema.audits)
+      .where(eq(schema.audits.id, auditId))
+      .limit(1);
+
+    if (!rows[0]) return null;
+    return this.mapAuditRow(rows[0]);
+  }
+
+  async listUserAudits(userId: string): Promise<PersistedAuditRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.audits)
+      .where(eq(schema.audits.userId, userId))
+      .orderBy(desc(schema.audits.createdAt));
+
+    return rows.map((r) => this.mapAuditRow(r));
+  }
+
+  async saveFinding(finding: PersistedFindingRecord): Promise<PersistedFindingRecord> {
+    const compositeId = `${finding.audit_id}:${finding.finding_id}`;
+    await this.db
+      .insert(schema.findings)
+      .values({
+        id: compositeId,
+        auditId: finding.audit_id,
+        findingId: finding.finding_id,
+        userId: finding.user_id,
+        ruleId: finding.rule_id,
+        title: finding.title,
+        summary: finding.summary,
+        affectedScope: finding.affected_scope ?? null,
+        detectionConfidence: finding.detection_confidence ?? null,
+        baselineSpendUsd: finding.baseline_spend_usd,
+        candidateSpendUsd: finding.candidate_spend_usd ?? null,
+        estimatedSavingsUsd: finding.estimated_savings_usd,
+        potentialSavingsPct: finding.potential_savings_pct ?? null,
+        annualizedProjectionUsd: finding.annualized_projection_usd,
+        eligibleEventCount: finding.eligible_event_count,
+        calculationMethod: finding.calculation_method ?? null,
+        assumptionsJson: finding.assumptions ? JSON.stringify(finding.assumptions) : null,
+        evidenceJson: finding.evidence ? JSON.stringify(finding.evidence) : null,
+        status: finding.status,
+        isSampleData: finding.is_sample_data,
+        createdAt: finding.created_at,
+      })
+      .onConflictDoUpdate({
+        target: schema.findings.id,
+        set: {
+          title: finding.title,
+          summary: finding.summary,
+          affectedScope: finding.affected_scope ?? null,
+          detectionConfidence: finding.detection_confidence ?? null,
+          baselineSpendUsd: finding.baseline_spend_usd,
+          candidateSpendUsd: finding.candidate_spend_usd ?? null,
+          estimatedSavingsUsd: finding.estimated_savings_usd,
+          potentialSavingsPct: finding.potential_savings_pct ?? null,
+          annualizedProjectionUsd: finding.annualized_projection_usd,
+          eligibleEventCount: finding.eligible_event_count,
+          calculationMethod: finding.calculation_method ?? null,
+          assumptionsJson: finding.assumptions ? JSON.stringify(finding.assumptions) : null,
+          evidenceJson: finding.evidence ? JSON.stringify(finding.evidence) : null,
+          status: finding.status,
+          isSampleData: finding.is_sample_data,
+        },
+      });
+
+    return finding;
+  }
+
+  async saveFindings(findings: PersistedFindingRecord[]): Promise<PersistedFindingRecord[]> {
+    for (const finding of findings) {
+      await this.saveFinding(finding);
+    }
+    return findings;
+  }
+
+  async getFinding(auditId: string, findingId: string): Promise<PersistedFindingRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(schema.findings)
+      .where(and(eq(schema.findings.auditId, auditId), eq(schema.findings.findingId, findingId)))
+      .limit(1);
+
+    if (!rows[0]) return null;
+    return this.mapFindingRow(rows[0]);
+  }
+
+  async getFindingById(findingId: string, userId?: string): Promise<PersistedFindingRecord | null> {
+    const condition = userId
+      ? and(eq(schema.findings.findingId, findingId), eq(schema.findings.userId, userId))
+      : eq(schema.findings.findingId, findingId);
+
+    const rows = await this.db
+      .select()
+      .from(schema.findings)
+      .where(condition)
+      .orderBy(desc(schema.findings.createdAt))
+      .limit(1);
+
+    if (!rows[0]) return null;
+    return this.mapFindingRow(rows[0]);
+  }
+
+  async listAuditFindings(auditId: string): Promise<PersistedFindingRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.findings)
+      .where(eq(schema.findings.auditId, auditId));
+
+    return rows.map((r) => this.mapFindingRow(r));
+  }
+
+  private mapAuditRow(row: schema.AuditRow): PersistedAuditRecord {
+    return {
+      audit_id: row.id,
+      user_id: row.userId,
+      source: row.source,
+      total_spend_usd: row.totalSpendUsd,
+      potential_savings_usd: row.potentialSavingsUsd,
+      annualized_savings_projection_usd: row.annualizedSavingsProjectionUsd,
+      is_sample_data: Boolean(row.isSampleData),
+      health_grade: row.healthGrade ?? undefined,
+      health_report: row.healthReportJson ? JSON.parse(row.healthReportJson) : undefined,
+      findings_count: row.findingsCount,
+      created_at: row.createdAt,
+    };
+  }
+
+  private mapFindingRow(row: schema.FindingRow): PersistedFindingRecord {
+    return {
+      audit_id: row.auditId,
+      finding_id: row.findingId,
+      user_id: row.userId,
+      rule_id: row.ruleId,
+      title: row.title,
+      summary: row.summary,
+      affected_scope: row.affectedScope ?? undefined,
+      detection_confidence: (row.detectionConfidence as any) ?? undefined,
+      baseline_spend_usd: row.baselineSpendUsd,
+      candidate_spend_usd: row.candidateSpendUsd ?? undefined,
+      estimated_savings_usd: row.estimatedSavingsUsd,
+      potential_savings_pct: row.potentialSavingsPct ?? undefined,
+      annualized_projection_usd: row.annualizedProjectionUsd,
+      eligible_event_count: row.eligibleEventCount,
+      calculation_method: row.calculationMethod ?? undefined,
+      assumptions: row.assumptionsJson ? JSON.parse(row.assumptionsJson) : undefined,
+      evidence: row.evidenceJson ? JSON.parse(row.evidenceJson) : undefined,
+      status: row.status as any,
+      is_sample_data: Boolean(row.isSampleData),
+      created_at: row.createdAt,
+    };
   }
 
   // --- Health & Readiness Check ---

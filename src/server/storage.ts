@@ -5,10 +5,11 @@
 
 import fs from 'fs';
 import path from 'path';
-import { User, UserSession, Entitlement, FindingOwnership, ProcessedWebhookEvent, AuthoritativeVerification, OutcomeFeeObligation } from './types';
+import { User, UserSession, Entitlement, FindingOwnership, ProcessedWebhookEvent, AuthoritativeVerification, OutcomeFeeObligation, PersistedAuditRecord, PersistedFindingRecord } from './types';
 import { IStorage } from './storage-interface';
 import { createDatabaseConnection } from './db/index';
 import { DrizzleStorageAdapter } from './db/adapter';
+import { hashSessionToken } from './auth';
 
 export type { IStorage } from './storage-interface';
 
@@ -22,6 +23,8 @@ interface StoreSchema {
   verifications: Record<string, AuthoritativeVerification>; // finding_id -> AuthoritativeVerification
   outcomeFeeObligations: Record<string, OutcomeFeeObligation>; // finding_id -> OutcomeFeeObligation
   outcomeFeeObligationsById: Record<string, string>; // obligation_id -> finding_id
+  audits: Record<string, PersistedAuditRecord>; // audit_id -> PersistedAuditRecord
+  findings: Record<string, PersistedFindingRecord>; // `${audit_id}:${finding_id}` -> PersistedFindingRecord
 }
 
 export class ServerStorage implements IStorage {
@@ -44,6 +47,8 @@ export class ServerStorage implements IStorage {
       verifications: {},
       outcomeFeeObligations: {},
       outcomeFeeObligationsById: {},
+      audits: {},
+      findings: {},
     };
     this.loadFromDisk();
   }
@@ -70,6 +75,8 @@ export class ServerStorage implements IStorage {
           verifications: parsed.verifications || {},
           outcomeFeeObligations: parsed.outcomeFeeObligations || {},
           outcomeFeeObligationsById: parsed.outcomeFeeObligationsById || {},
+          audits: parsed.audits || {},
+          findings: parsed.findings || {},
         };
       }
     } catch (err) {
@@ -109,6 +116,8 @@ export class ServerStorage implements IStorage {
       verifications: {},
       outcomeFeeObligations: {},
       outcomeFeeObligationsById: {},
+      audits: {},
+      findings: {},
     };
     this.flushToDisk();
   }
@@ -138,26 +147,53 @@ export class ServerStorage implements IStorage {
 
   // --- Session Operations ---
   async createSession(session: UserSession): Promise<UserSession> {
-    this.data.sessions[session.token] = session;
+    const hashedToken = hashSessionToken(session.token);
+    const storedSession: UserSession = {
+      ...session,
+      token: hashedToken,
+    };
+    this.data.sessions[hashedToken] = storedSession;
     this.flushToDisk();
     return session;
   }
 
   async getSession(token: string): Promise<{ session: UserSession; user: User } | null> {
     if (!token) return null;
-    const session = this.data.sessions[token];
+    const hashedToken = hashSessionToken(token);
+    let session = this.data.sessions[hashedToken];
+    let isLegacy = false;
+
+    if (!session) {
+      session = this.data.sessions[token];
+      if (session) {
+        isLegacy = true;
+      }
+    }
+
     if (!session) return null;
 
     // Check expiration
     if (new Date(session.expires_at).getTime() < Date.now()) {
-      delete this.data.sessions[token];
+      delete this.data.sessions[isLegacy ? token : hashedToken];
       this.flushToDisk();
       return null;
     }
 
+    // Migrate legacy session to hashed token
+    if (isLegacy) {
+      delete this.data.sessions[token];
+      const migratedSession: UserSession = {
+        ...session,
+        token: hashedToken,
+      };
+      this.data.sessions[hashedToken] = migratedSession;
+      this.flushToDisk();
+      session = migratedSession;
+    }
+
     const user = await this.getUserById(session.user_id);
     if (!user) {
-      delete this.data.sessions[token];
+      delete this.data.sessions[hashedToken];
       this.flushToDisk();
       return null;
     }
@@ -166,12 +202,21 @@ export class ServerStorage implements IStorage {
   }
 
   async deleteSession(token: string): Promise<boolean> {
+    if (!token) return false;
+    const hashedToken = hashSessionToken(token);
+    let deleted = false;
+    if (this.data.sessions[hashedToken]) {
+      delete this.data.sessions[hashedToken];
+      deleted = true;
+    }
     if (this.data.sessions[token]) {
       delete this.data.sessions[token];
-      this.flushToDisk();
-      return true;
+      deleted = true;
     }
-    return false;
+    if (deleted) {
+      this.flushToDisk();
+    }
+    return deleted;
   }
 
   // --- Finding Ownership Operations ---
@@ -410,6 +455,64 @@ export class ServerStorage implements IStorage {
     this.inFlightWebhooks.delete(params.event.event_id);
     this.flushToDisk();
     return { status: 'SUCCESS' };
+  }
+
+  // --- Audit and Finding Operations ---
+  private findingCompositeKey(auditId: string, findingId: string): string {
+    return `${auditId}:${findingId}`;
+  }
+
+  async saveAudit(audit: PersistedAuditRecord): Promise<PersistedAuditRecord> {
+    this.data.audits[audit.audit_id] = audit;
+    this.flushToDisk();
+    return audit;
+  }
+
+  async getAudit(auditId: string): Promise<PersistedAuditRecord | null> {
+    return this.data.audits[auditId] || null;
+  }
+
+  async listUserAudits(userId: string): Promise<PersistedAuditRecord[]> {
+    return Object.values(this.data.audits)
+      .filter((a) => a.user_id === userId)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  }
+
+  async saveFinding(finding: PersistedFindingRecord): Promise<PersistedFindingRecord> {
+    const key = this.findingCompositeKey(finding.audit_id, finding.finding_id);
+    this.data.findings[key] = finding;
+    this.flushToDisk();
+    return finding;
+  }
+
+  async saveFindings(findings: PersistedFindingRecord[]): Promise<PersistedFindingRecord[]> {
+    for (const finding of findings) {
+      const key = this.findingCompositeKey(finding.audit_id, finding.finding_id);
+      this.data.findings[key] = finding;
+    }
+    this.flushToDisk();
+    return findings;
+  }
+
+  async getFinding(auditId: string, findingId: string): Promise<PersistedFindingRecord | null> {
+    const key = this.findingCompositeKey(auditId, findingId);
+    return this.data.findings[key] || null;
+  }
+
+  async getFindingById(findingId: string, userId?: string): Promise<PersistedFindingRecord | null> {
+    const matches = Object.values(this.data.findings).filter((f) => {
+      if (f.finding_id !== findingId) return false;
+      if (userId && f.user_id !== userId) return false;
+      return true;
+    });
+
+    if (matches.length === 0) return null;
+    matches.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    return matches[0];
+  }
+
+  async listAuditFindings(auditId: string): Promise<PersistedFindingRecord[]> {
+    return Object.values(this.data.findings).filter((f) => f.audit_id === auditId);
   }
 
   // --- Health & Readiness Check ---

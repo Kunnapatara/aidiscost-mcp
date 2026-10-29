@@ -109,6 +109,50 @@ export const outcomeFeeObligations = sqliteTable('outcome_fee_obligations', {
   index('idx_outcome_fee_user_id').on(table.userId),
 ]);
 
+export const audits = sqliteTable('audits', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  source: text('source').notNull(),
+  totalSpendUsd: real('total_spend_usd').notNull(),
+  potentialSavingsUsd: real('potential_savings_usd').notNull(),
+  annualizedSavingsProjectionUsd: real('annualized_savings_projection_usd').notNull(),
+  isSampleData: integer('is_sample_data', { mode: 'boolean' }).notNull().default(false),
+  healthGrade: text('health_grade'),
+  healthReportJson: text('health_report_json'),
+  findingsCount: integer('findings_count').notNull().default(0),
+  createdAt: text('created_at').notNull(),
+}, (table) => [
+  index('idx_audits_user_id').on(table.userId),
+]);
+
+export const findings = sqliteTable('findings', {
+  id: text('id').primaryKey(),
+  auditId: text('audit_id').notNull().references(() => audits.id, { onDelete: 'cascade' }),
+  findingId: text('finding_id').notNull(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  ruleId: text('rule_id').notNull(),
+  title: text('title').notNull(),
+  summary: text('summary').notNull(),
+  affectedScope: text('affected_scope'),
+  detectionConfidence: text('detection_confidence'),
+  baselineSpendUsd: real('baseline_spend_usd').notNull(),
+  candidateSpendUsd: real('candidate_spend_usd'),
+  estimatedSavingsUsd: real('estimated_savings_usd').notNull(),
+  potentialSavingsPct: real('potential_savings_pct'),
+  annualizedProjectionUsd: real('annualized_projection_usd').notNull(),
+  eligibleEventCount: integer('eligible_event_count').notNull(),
+  calculationMethod: text('calculation_method'),
+  assumptionsJson: text('assumptions_json'),
+  evidenceJson: text('evidence_json'),
+  status: text('status').notNull().default('DETECTED'),
+  isSampleData: integer('is_sample_data', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').notNull(),
+}, (table) => [
+  uniqueIndex('idx_findings_audit_finding').on(table.auditId, table.findingId),
+  index('idx_findings_user_id').on(table.userId),
+  index('idx_findings_finding_id').on(table.findingId),
+]);
+
 export type UserRow = typeof users.$inferSelect;
 export type UserInsert = typeof users.$inferInsert;
 export type SessionRow = typeof sessions.$inferSelect;
@@ -123,3 +167,7 @@ export type VerificationRow = typeof verifications.$inferSelect;
 export type VerificationInsert = typeof verifications.$inferInsert;
 export type OutcomeFeeObligationRow = typeof outcomeFeeObligations.$inferSelect;
 export type OutcomeFeeObligationInsert = typeof outcomeFeeObligations.$inferInsert;
+export type AuditRow = typeof audits.$inferSelect;
+export type AuditInsert = typeof audits.$inferInsert;
+export type FindingRow = typeof findings.$inferSelect;
+export type FindingInsert = typeof findings.$inferInsert;

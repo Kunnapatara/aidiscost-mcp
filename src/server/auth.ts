@@ -45,6 +45,13 @@ export function generateSessionToken(): string {
   return crypto.randomBytes(32).toString('hex');
 }
 
+/**
+ * Hashes session token using SHA-256 for secure storage at rest.
+ */
+export function hashSessionToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 export interface AuthenticatedRequest extends Request {
   user?: User;
   sessionToken?: string;

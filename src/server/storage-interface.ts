@@ -3,7 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { User, UserSession, Entitlement, FindingOwnership, ProcessedWebhookEvent, AuthoritativeVerification, OutcomeFeeObligation } from './types';
+import {
+  User,
+  UserSession,
+  Entitlement,
+  FindingOwnership,
+  ProcessedWebhookEvent,
+  AuthoritativeVerification,
+  OutcomeFeeObligation,
+  PersistedAuditRecord,
+  PersistedFindingRecord,
+} from './types';
 
 export interface IStorage {
   // --- User Operations ---
@@ -15,6 +25,17 @@ export interface IStorage {
   createSession(session: UserSession): Promise<UserSession>;
   getSession(token: string): Promise<{ session: UserSession; user: User } | null>;
   deleteSession(token: string): Promise<boolean>;
+
+  // --- Audit & Finding Persistence Operations ---
+  saveAudit(audit: PersistedAuditRecord): Promise<PersistedAuditRecord>;
+  getAudit(auditId: string): Promise<PersistedAuditRecord | null>;
+  listUserAudits(userId: string): Promise<PersistedAuditRecord[]>;
+
+  saveFinding(finding: PersistedFindingRecord): Promise<PersistedFindingRecord>;
+  saveFindings(findings: PersistedFindingRecord[]): Promise<PersistedFindingRecord[]>;
+  getFinding(auditId: string, findingId: string): Promise<PersistedFindingRecord | null>;
+  getFindingById(findingId: string, userId?: string): Promise<PersistedFindingRecord | null>;
+  listAuditFindings(auditId: string): Promise<PersistedFindingRecord[]>;
 
   // --- Finding Ownership Operations ---
   registerFindingOwnership(findingId: string, ownerId: string): Promise<FindingOwnership>;

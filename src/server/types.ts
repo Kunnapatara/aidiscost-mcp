@@ -109,3 +109,42 @@ export interface AuthoritativeVerification {
   created_at: string;
   updated_at: string;
 }
+
+export interface PersistedAuditRecord {
+  id?: string;
+  audit_id: string;
+  user_id: string;
+  source: string;
+  total_spend_usd: number;
+  potential_savings_usd: number;
+  annualized_savings_projection_usd: number;
+  is_sample_data: boolean;
+  health_grade?: string;
+  health_report?: any;
+  findings_count: number;
+  created_at: string;
+}
+
+export interface PersistedFindingRecord {
+  id?: string; // composite `${audit_id}:${finding_id}`
+  audit_id: string;
+  finding_id: string;
+  user_id: string;
+  rule_id: string;
+  title: string;
+  summary: string;
+  affected_scope?: string;
+  detection_confidence?: string;
+  baseline_spend_usd: number;
+  candidate_spend_usd?: number;
+  estimated_savings_usd: number;
+  potential_savings_pct?: number;
+  annualized_projection_usd: number;
+  eligible_event_count: number;
+  calculation_method?: string;
+  assumptions?: string[];
+  evidence?: any;
+  status: string;
+  is_sample_data: boolean;
+  created_at: string;
+}

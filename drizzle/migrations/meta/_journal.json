@@ -29,6 +29,13 @@
       "when": 1790850000000,
       "tag": "0003_authoritative_outcome_fee_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1790900000000,
+      "tag": "0004_audit_and_finding_persistence",
+      "breakpoints": true
     }
   ]
 }
