@@ -66,6 +66,7 @@ export type OutcomeFeeStatus = 'PAYABLE' | 'CHECKOUT_CREATED' | 'PAID' | 'SETTLE
 export interface OutcomeFeeObligation {
   id: string;
   user_id: string;
+  audit_id?: string;
   finding_id: string;
   verification_id: string;
   verified_annualized_savings_usd: number;
@@ -86,6 +87,7 @@ export type VerificationStage = 'BASELINE' | 'CUSTOMER_DEPLOYED' | 'OBSERVATION_
 export interface AuthoritativeVerification {
   id: string;
   finding_id: string;
+  audit_id?: string;
   user_id: string;
   stage: VerificationStage;
   is_authoritative: boolean;

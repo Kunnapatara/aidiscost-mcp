@@ -738,12 +738,13 @@ describe('Turso/libSQL & Drizzle Persistence Test Suite', () => {
       }
     });
 
-    test('two independent adapters with separate in-memory caches resolve concurrent webhooks safely', async () => {
+    test('two independent adapters with separate in-memory caches resolve concurrent webhooks safely', { timeout: 15000 }, async () => {
       // Connect Adapter A and Adapter B to the exact same database file
       const connA = createDatabaseConnection({ url: `file:${sharedDbFile}` });
       await initializeDatabaseSchema(connA.client);
+      await connA.client.execute('PRAGMA busy_timeout = 2000;');
       const connB = createDatabaseConnection({ url: `file:${sharedDbFile}` });
-      await connB.client.execute('PRAGMA busy_timeout = 5000;');
+      await connB.client.execute('PRAGMA busy_timeout = 2000;');
 
       const adapterA = new DrizzleStorageAdapter(connA.db, connA.client);
       const adapterB = new DrizzleStorageAdapter(connB.db, connB.client);

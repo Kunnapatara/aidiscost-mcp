@@ -183,6 +183,13 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         let failedCount = 0;
         const verifiedOwnerFindingIds = new Set<string>();
 
+        let auditSaved = false;
+        let findingsSavedCount = 0;
+        let persistenceStatus: 'SUCCESS' | 'PARTIAL_SUCCESS' | 'FAILED' | 'SKIPPED_ANONYMOUS' = user
+          ? 'SUCCESS'
+          : 'SKIPPED_ANONYMOUS';
+        let persistenceWarning: string | undefined;
+
         if (user) {
           try {
             const auditRecord: PersistedAuditRecord = {
@@ -202,34 +209,54 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
               created_at: auditSummary.created_at || new Date().toISOString(),
             };
             await storage.saveAudit(auditRecord);
-
-            if (auditSummary.findings.length > 0) {
-              const findingRecords: PersistedFindingRecord[] = auditSummary.findings.map((f) => ({
-                audit_id: auditSummary.id,
-                finding_id: f.id,
-                user_id: user.id,
-                rule_id: f.rule_id,
-                title: f.title,
-                summary: f.summary,
-                affected_scope: f.affected_scope,
-                detection_confidence: f.detection_confidence,
-                baseline_spend_usd: f.baseline_spend_usd,
-                candidate_spend_usd: f.candidate_spend_usd,
-                estimated_savings_usd: f.estimated_savings_usd,
-                potential_savings_pct: f.potential_savings_pct,
-                annualized_projection_usd: f.annualized_projection_usd,
-                eligible_event_count: f.eligible_event_count,
-                calculation_method: f.calculation_method,
-                assumptions: f.assumptions,
-                evidence: f.evidence as any,
-                status: 'DETECTED',
-                is_sample_data: auditSummary.is_sample_data,
-                created_at: auditSummary.created_at || new Date().toISOString(),
-              }));
-              await storage.saveFindings(findingRecords);
-            }
+            auditSaved = true;
           } catch (persistErr) {
-            console.warn('[MCP run_cost_audit] Warning persisting audit and findings:', (persistErr as Error).message);
+            auditSaved = false;
+            console.warn('[MCP run_cost_audit] Warning persisting audit:', (persistErr as Error).message);
+          }
+
+          if (auditSummary.findings.length > 0) {
+            for (const f of auditSummary.findings) {
+              try {
+                const findingRecord: PersistedFindingRecord = {
+                  audit_id: auditSummary.id,
+                  finding_id: f.id,
+                  user_id: user.id,
+                  rule_id: f.rule_id,
+                  title: f.title,
+                  summary: f.summary,
+                  affected_scope: f.affected_scope,
+                  detection_confidence: f.detection_confidence,
+                  baseline_spend_usd: f.baseline_spend_usd,
+                  candidate_spend_usd: f.candidate_spend_usd,
+                  estimated_savings_usd: f.estimated_savings_usd,
+                  potential_savings_pct: f.potential_savings_pct,
+                  annualized_projection_usd: f.annualized_projection_usd,
+                  eligible_event_count: f.eligible_event_count,
+                  calculation_method: f.calculation_method,
+                  assumptions: f.assumptions,
+                  evidence: f.evidence as any,
+                  status: 'DETECTED',
+                  is_sample_data: auditSummary.is_sample_data,
+                  created_at: auditSummary.created_at || new Date().toISOString(),
+                };
+                await storage.saveFinding(findingRecord);
+                findingsSavedCount++;
+              } catch (err) {
+                console.warn('[MCP run_cost_audit] Warning persisting finding:', (err as Error).message);
+              }
+            }
+          }
+
+          const totalFindings = auditSummary.findings.length;
+          if (auditSaved && (totalFindings === 0 || findingsSavedCount === totalFindings)) {
+            persistenceStatus = 'SUCCESS';
+          } else if (auditSaved || findingsSavedCount > 0) {
+            persistenceStatus = 'PARTIAL_SUCCESS';
+            persistenceWarning = `Audit persisted=${auditSaved}, findings persisted=${findingsSavedCount}/${totalFindings}.`;
+          } else {
+            persistenceStatus = 'FAILED';
+            persistenceWarning = 'Failed to persist audit and findings records.';
           }
         }
 
@@ -322,6 +349,21 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
             is_unlocked: false,
             is_owned_by_requesting_user: user ? verifiedOwnerFindingIds.has(f.id) : false,
           })),
+          persistence: user
+            ? {
+                status: persistenceStatus,
+                audit_saved: auditSaved,
+                findings_saved_count: findingsSavedCount,
+                total_findings: auditSummary.findings.length,
+                warning: persistenceWarning,
+              }
+            : {
+                status: 'SKIPPED_ANONYMOUS',
+                audit_saved: false,
+                findings_saved_count: 0,
+                total_findings: auditSummary.findings.length,
+                note: 'Free scan performed anonymously; persistence skipped.',
+              },
           ownership: user
             ? {
                 registered_to_user_id: ownershipConfirmed ? user.id : null,
@@ -412,8 +454,25 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         }
 
         // 2. Check ownership - must exist and belong to the authenticated user
+        const findingRecord = await storage.getFindingById(finding_id);
+        if (findingRecord && findingRecord.user_id !== user.id) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'FINDING_NOT_FOUND',
+                  message: 'Finding not found or access denied.',
+                }),
+              },
+            ],
+          };
+        }
+
         const ownerId = await storage.getFindingOwner(finding_id);
-        if (!ownerId || ownerId !== user.id) {
+        const isOwner = (findingRecord && findingRecord.user_id === user.id) || (ownerId === user.id);
+        if (!isOwner) {
           // Consistent non-disclosing response for unowned, non-existent, or mismatched findings
           return {
             isError: true,
@@ -432,7 +491,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         // 3. Query entitlement and outcome fee obligation
         const isPaid = await storage.hasActivePaidEntitlement(user.id, finding_id);
         const entitlement = await storage.getEntitlement(user.id, finding_id);
-        const obligation = await storage.getOutcomeFeeObligation(finding_id);
+        const obligation = await storage.getOutcomeFeeObligation(finding_id, user.id, findingRecord?.audit_id);
 
         const responsePayload = {
           finding_id,
@@ -524,6 +583,25 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           };
         }
 
+        // If audit_id is provided, verify audit exists and belongs to this user
+        if (audit_id) {
+          const audit = await storage.getAudit(audit_id);
+          if (!audit || audit.user_id !== user.id) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
+        }
+
         let findingRecord: PersistedFindingRecord | null = null;
         if (audit_id) {
           findingRecord = await storage.getFinding(audit_id, finding_id);
@@ -531,9 +609,26 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           findingRecord = await storage.getFindingById(finding_id, user.id);
         }
 
+        // Must strictly exist and belong to the authenticated user
         if (!findingRecord || findingRecord.user_id !== user.id) {
-          const ownerId = await storage.getFindingOwner(finding_id);
-          if (!ownerId || ownerId !== user.id || !findingRecord) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'FINDING_NOT_FOUND',
+                  message: 'Finding not found or access denied.',
+                }),
+              },
+            ],
+          };
+        }
+
+        // If the finding belongs to an audit, verify parent audit also belongs to user
+        if (findingRecord.audit_id) {
+          const parentAudit = await storage.getAudit(findingRecord.audit_id);
+          if (!parentAudit || parentAudit.user_id !== user.id) {
             return {
               isError: true,
               content: [
@@ -709,6 +804,25 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           }
         }
 
+        // If audit_id is provided, verify audit exists and belongs to this user
+        if (audit_id) {
+          const audit = await storage.getAudit(audit_id);
+          if (!audit || audit.user_id !== user.id) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
+        }
+
         let findingRecord: PersistedFindingRecord | null = null;
         if (audit_id) {
           findingRecord = await storage.getFinding(audit_id, finding_id);
@@ -716,9 +830,26 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           findingRecord = await storage.getFindingById(finding_id, user.id);
         }
 
+        // Must strictly exist and belong to the authenticated user
         if (!findingRecord || findingRecord.user_id !== user.id) {
-          const ownerId = await storage.getFindingOwner(finding_id);
-          if (!ownerId || ownerId !== user.id || !findingRecord) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'FINDING_NOT_FOUND',
+                  message: 'Finding not found or access denied.',
+                }),
+              },
+            ],
+          };
+        }
+
+        // If the finding belongs to an audit, verify parent audit also belongs to user
+        if (findingRecord.audit_id) {
+          const parentAudit = await storage.getAudit(findingRecord.audit_id);
+          if (!parentAudit || parentAudit.user_id !== user.id) {
             return {
               isError: true,
               content: [
@@ -758,7 +889,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         }
 
         const domainFinding = persistedFindingToDomain(findingRecord);
-        const existing = await storage.getVerificationByFindingId(finding_id);
+        const existing = await storage.getVerificationByFindingId(finding_id, user.id, findingRecord.audit_id);
         const now = new Date().toISOString();
         const deployTime = deployment_timestamp || existing?.deployment_timestamp || now;
         const obsStart = existing?.observation_start || deployTime;
@@ -804,6 +935,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         const authRecord: AuthoritativeVerification = {
           id: existing?.id || `ver_${crypto.randomUUID()}`,
           finding_id,
+          audit_id: findingRecord.audit_id,
           user_id: user.id,
           stage: evaluated.stage,
           is_authoritative: isAuth,
@@ -830,7 +962,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
 
         await storage.saveVerification(authRecord);
 
-        const obligation = await storage.getOutcomeFeeObligation(finding_id);
+        const obligation = await storage.getOutcomeFeeObligation(finding_id, user.id, findingRecord.audit_id);
 
         const responsePayload = {
           finding_id,

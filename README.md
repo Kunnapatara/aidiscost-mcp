@@ -32,7 +32,7 @@ AIDisCost MCP operates on a transparent, outcome-aligned 3-tier commercial model
 AIDisCost MCP exposes 4 core tools compliant with the Model Context Protocol specification:
 
 ### `run_cost_audit`
-Ingests raw AI telemetry, runs data health heuristics, executes cost optimization rules, and optionally registers finding ownership for authenticated users.
+Ingests raw AI telemetry, runs data health heuristics, executes cost optimization rules, and optionally registers finding ownership and records persistence for authenticated users.
 
 - **Parameters:**
   - `telemetry_data` (*string*, required): Raw telemetry payload (up to 1.8MB). Supported formats: CSV, JSON array, JSONL, NDJSON.
@@ -45,7 +45,8 @@ Ingests raw AI telemetry, runs data health heuristics, executes cost optimizatio
     - Persists audit summary in database/storage with composite foreign keys.
     - Persists normalized findings keyed by `${audit_id}:${finding_id}` to ensure historical immutability.
     - Registers finding ownership in the ownership registry with read-back verification.
-- **Key Output Fields:** `audit_id`, `detected_source`, `total_spend_usd`, `potential_savings_usd`, `annualized_savings_projection_usd`, `data_health`, `findings`, `ownership`.
+    - Returns structured persistence status distinguishing audit analysis from storage writes.
+- **Key Output Fields:** `audit_id`, `detected_source`, `total_spend_usd`, `potential_savings_usd`, `annualized_savings_projection_usd`, `data_health`, `findings`, `persistence` (`SUCCESS`, `PARTIAL_SUCCESS`, `FAILED`, `SKIPPED_ANONYMOUS`), `ownership`.
 
 ### `get_finding_details`
 Retrieves detailed engineering remediation instructions and test criteria for a specific finding.
@@ -55,7 +56,7 @@ Retrieves detailed engineering remediation instructions and test criteria for a 
   - `audit_id` (*string*, optional): Audit ID containing the finding to disambiguate historical runs.
 - **Security & Isolation:**
   - Requires valid user authentication.
-  - Strict account isolation: returns `FINDING_NOT_FOUND` if the finding belongs to another account.
+  - Strict account isolation: returns `FINDING_NOT_FOUND` if the finding belongs to another account or if parent audit ownership does not match.
 - **Key Output Fields:** `finding_id`, `audit_id`, `rule_id`, `baseline_spend_usd`, `candidate_spend_usd`, `estimated_savings_usd`, `annualized_projection_usd`, `fix_package` (unlocked if entitled; locked template if unpurchased), `entitlement` status.
 
 ### `check_entitlement`
@@ -82,6 +83,7 @@ Evaluates empirical post-deployment telemetry against a baseline finding to auth
   - Minimum 15 eligible post-deployment observations.
   - Minimum 10.0% unit-cost reduction on comparable workload.
   - Observation window must be strictly positive and chronological (`start < end`).
+  - Scoped to `(audit_id, finding_id, user_id)` to prevent collisions across multiple runs or users.
   - Automatically records authoritative verification in storage and calculates the 20% outcome fee basis when qualified.
 
 ---
@@ -118,8 +120,8 @@ Telemetry Ingestion
 ## 4. Setup & Environment Configuration
 
 ### Prerequisites
-- Node.js 20+
-- npm 10+
+- Node.js 20+ (or Bun 1.1+)
+- npm 10+ (or bun)
 
 ### Environment Variables
 Configure `.env` using `.env.example` as a template:
@@ -134,8 +136,8 @@ ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
 SESSION_SECRET=your-secure-random-session-secret
 
 # Database Storage (LibSQL / Turso)
-# In development/test, ServerStorage uses local JSON file if TURSO_DATABASE_URL is not set.
-# In production, TURSO_DATABASE_URL is strictly required.
+# In development/test without Turso credentials, storage falls back to local file-backed JSON storage (.aidiscost-storage.json).
+# In production, configure TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
 TURSO_DATABASE_URL=libsql://your-db.turso.io
 TURSO_AUTH_TOKEN=your-turso-auth-token
 
@@ -148,23 +150,22 @@ LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID=654321
 ```
 
 ### Database Migrations
-AIDisCost uses Drizzle ORM targeting SQLite / LibSQL:
+AIDisCost uses Drizzle ORM targeting SQLite / LibSQL. Execute migrations using the provided script:
 
 ```bash
-# Generate migrations after schema modifications
-npm run db:generate
-
-# Execute migrations on target database
+# Execute migrations on target database (scripts/migrate-db.ts)
 npm run db:migrate
+# or with bun:
+bun run db:migrate
 ```
 
-*Note:* When starting with LibSQL/Turso, the database adapter automatically executes `initializeDatabaseSchema()` to verify and create tables, composite indexes, and foreign keys.
+*Note:* When connected to LibSQL/Turso, the database adapter automatically verifies and creates tables, foreign keys, and composite indexes via `initializeDatabaseSchema()` on startup.
 
 ---
 
 ## 5. MCP Client Integration
 
-AIDisCost MCP supports both stdio transport (direct CLI spawn) and HTTP/SSE transport via the web server.
+AIDisCost MCP supports both stdio transport (direct CLI spawn) and HTTP/SSE transport via the server. Because the server is written in TypeScript and executed via `tsx` or `bun`, use `npx tsx` or `bun` to run `server.ts` directly.
 
 ### Claude Desktop Configuration
 Add the following to your `claude_desktop_config.json`:
@@ -173,8 +174,8 @@ Add the following to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "aidiscost": {
-      "command": "node",
-      "args": ["/path/to/aidiscost-mcp/dist/server.js"],
+      "command": "npx",
+      "args": ["-y", "tsx", "/path/to/aidiscost-mcp/server.ts"],
       "env": {
         "NODE_ENV": "production",
         "PORT": "3000",
@@ -187,6 +188,18 @@ Add the following to your `claude_desktop_config.json`:
 }
 ```
 
+*Alternative (using Bun):*
+```json
+{
+  "mcpServers": {
+    "aidiscost": {
+      "command": "bun",
+      "args": ["/path/to/aidiscost-mcp/server.ts"]
+    }
+  }
+}
+```
+
 ### Cursor Configuration
 Add to `.cursor/mcp.json` or your Cursor MCP Settings:
 
@@ -194,8 +207,8 @@ Add to `.cursor/mcp.json` or your Cursor MCP Settings:
 {
   "mcpServers": {
     "aidiscost": {
-      "command": "node",
-      "args": ["/path/to/aidiscost-mcp/dist/server.js"]
+      "command": "npx",
+      "args": ["-y", "tsx", "/path/to/aidiscost-mcp/server.ts"]
     }
   }
 }
@@ -208,12 +221,15 @@ Add to `.cursor/mcp.json` or your Cursor MCP Settings:
 ```bash
 # Run full unit and integration test suite
 npm test
+# or: bun test
 
-# Run linter
+# Run TypeScript type check / linter
 npm run lint
+# or: bun run lint
 
-# Build full-stack distribution bundle
+# Build web frontend distribution bundle
 npm run build
+# or: bun run build
 ```
 
 ---

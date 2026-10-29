@@ -333,11 +333,21 @@ export class DrizzleStorageAdapter implements IStorage {
       ? verification.original_estimated_annualized_usd
       : null;
 
+    // Check if record exists for this finding/user/audit or by ID
+    const existing = await this.getVerificationByFindingId(
+      verification.finding_id,
+      verification.user_id,
+      verification.audit_id
+    );
+
+    const recordId = existing ? existing.id : verification.id;
+
     await this.db
       .insert(schema.verifications)
       .values({
-        id: verification.id,
+        id: recordId,
         findingId: verification.finding_id,
+        auditId: verification.audit_id || null,
         userId: verification.user_id,
         stage: verification.stage,
         isAuthoritative: verification.is_authoritative,
@@ -362,8 +372,9 @@ export class DrizzleStorageAdapter implements IStorage {
         updatedAt: verification.updated_at,
       })
       .onConflictDoUpdate({
-        target: schema.verifications.findingId,
+        target: schema.verifications.id,
         set: {
+          auditId: verification.audit_id || null,
           stage: verification.stage,
           isAuthoritative: verification.is_authoritative,
           isSimulated: verification.is_simulated,
@@ -387,14 +398,27 @@ export class DrizzleStorageAdapter implements IStorage {
         },
       });
 
-    return verification;
+    return { ...verification, id: recordId };
   }
 
-  async getVerificationByFindingId(findingId: string): Promise<AuthoritativeVerification | null> {
+  async getVerificationByFindingId(
+    findingId: string,
+    userId?: string,
+    auditId?: string
+  ): Promise<AuthoritativeVerification | null> {
+    const conditions = [eq(schema.verifications.findingId, findingId)];
+    if (userId) {
+      conditions.push(eq(schema.verifications.userId, userId));
+    }
+    if (auditId) {
+      conditions.push(eq(schema.verifications.auditId, auditId));
+    }
+
     const rows = await this.db
       .select()
       .from(schema.verifications)
-      .where(eq(schema.verifications.findingId, findingId))
+      .where(and(...conditions))
+      .orderBy(desc(schema.verifications.createdAt))
       .limit(1);
 
     if (!rows[0]) return null;
@@ -407,6 +431,7 @@ export class DrizzleStorageAdapter implements IStorage {
     return {
       id: r.id,
       finding_id: r.findingId,
+      audit_id: r.auditId || undefined,
       user_id: r.userId,
       stage: r.stage as any,
       is_authoritative: Boolean(r.isAuthoritative),
@@ -437,6 +462,7 @@ export class DrizzleStorageAdapter implements IStorage {
     return {
       id: row.id,
       user_id: row.userId,
+      audit_id: row.auditId || undefined,
       finding_id: row.findingId,
       verification_id: row.verificationId,
       verified_annualized_savings_usd: row.verifiedAnnualizedSavingsUsd,
@@ -454,7 +480,11 @@ export class DrizzleStorageAdapter implements IStorage {
   }
 
   async createOutcomeFeeObligation(obligation: OutcomeFeeObligation): Promise<OutcomeFeeObligation> {
-    const existing = await this.getOutcomeFeeObligation(obligation.finding_id);
+    const existing = await this.getOutcomeFeeObligation(
+      obligation.finding_id,
+      obligation.user_id,
+      obligation.audit_id
+    );
     if (existing) {
       return existing;
     }
@@ -465,6 +495,7 @@ export class DrizzleStorageAdapter implements IStorage {
         id: obligation.id,
         userId: obligation.user_id,
         findingId: obligation.finding_id,
+        auditId: obligation.audit_id || null,
         verificationId: obligation.verification_id,
         verifiedAnnualizedSavingsUsd: obligation.verified_annualized_savings_usd,
         feeAmountUsd: obligation.fee_amount_usd,
@@ -480,26 +511,51 @@ export class DrizzleStorageAdapter implements IStorage {
       })
       .onConflictDoNothing();
 
-    const saved = await this.getOutcomeFeeObligation(obligation.finding_id);
+    const saved = await this.getOutcomeFeeObligation(
+      obligation.finding_id,
+      obligation.user_id,
+      obligation.audit_id
+    );
     return saved || obligation;
   }
 
-  async getOutcomeFeeObligation(findingId: string): Promise<OutcomeFeeObligation | null> {
+  async getOutcomeFeeObligation(
+    findingId: string,
+    userId?: string,
+    auditId?: string
+  ): Promise<OutcomeFeeObligation | null> {
+    const conditions = [eq(schema.outcomeFeeObligations.findingId, findingId)];
+    if (userId) {
+      conditions.push(eq(schema.outcomeFeeObligations.userId, userId));
+    }
+    if (auditId) {
+      conditions.push(eq(schema.outcomeFeeObligations.auditId, auditId));
+    }
+
     const rows = await this.db
       .select()
       .from(schema.outcomeFeeObligations)
-      .where(eq(schema.outcomeFeeObligations.findingId, findingId))
+      .where(and(...conditions))
+      .orderBy(desc(schema.outcomeFeeObligations.createdAt))
       .limit(1);
 
     if (!rows[0]) return null;
     return this.mapOutcomeFeeObligation(rows[0]);
   }
 
-  async getOutcomeFeeObligationById(obligationId: string): Promise<OutcomeFeeObligation | null> {
+  async getOutcomeFeeObligationById(
+    obligationId: string,
+    userId?: string
+  ): Promise<OutcomeFeeObligation | null> {
+    const conditions = [eq(schema.outcomeFeeObligations.id, obligationId)];
+    if (userId) {
+      conditions.push(eq(schema.outcomeFeeObligations.userId, userId));
+    }
+
     const rows = await this.db
       .select()
       .from(schema.outcomeFeeObligations)
-      .where(eq(schema.outcomeFeeObligations.id, obligationId))
+      .where(and(...conditions))
       .limit(1);
 
     if (!rows[0]) return null;
@@ -522,16 +578,19 @@ export class DrizzleStorageAdapter implements IStorage {
     return obligation;
   }
 
-  async hasPaidOutcomeFee(userId: string, findingId: string): Promise<boolean> {
+  async hasPaidOutcomeFee(userId: string, findingId: string, auditId?: string): Promise<boolean> {
+    const conditions = [
+      eq(schema.outcomeFeeObligations.userId, userId),
+      eq(schema.outcomeFeeObligations.findingId, findingId),
+    ];
+    if (auditId) {
+      conditions.push(eq(schema.outcomeFeeObligations.auditId, auditId));
+    }
+
     const rows = await this.db
       .select({ status: schema.outcomeFeeObligations.status })
       .from(schema.outcomeFeeObligations)
-      .where(
-        and(
-          eq(schema.outcomeFeeObligations.userId, userId),
-          eq(schema.outcomeFeeObligations.findingId, findingId)
-        )
-      )
+      .where(and(...conditions))
       .limit(1);
 
     return Boolean(rows[0] && (rows[0].status === 'PAID' || rows[0].status === 'SETTLED'));

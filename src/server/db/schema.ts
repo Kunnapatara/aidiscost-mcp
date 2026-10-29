@@ -59,7 +59,8 @@ export const webhookEvents = sqliteTable('webhook_events', {
 
 export const verifications = sqliteTable('verifications', {
   id: text('id').primaryKey(),
-  findingId: text('finding_id').notNull().references(() => findingOwnerships.findingId, { onDelete: 'cascade' }),
+  auditId: text('audit_id').references(() => audits.id, { onDelete: 'cascade' }),
+  findingId: text('finding_id').notNull(),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   stage: text('stage').notNull(), // 'BASELINE' | 'CUSTOMER_DEPLOYED' | 'OBSERVATION_ACTIVE' | 'VERIFIED_RESULT'
   isAuthoritative: integer('is_authoritative', { mode: 'boolean' }).notNull().default(false),
@@ -83,14 +84,16 @@ export const verifications = sqliteTable('verifications', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 }, (table) => [
-  uniqueIndex('idx_verifications_finding_id').on(table.findingId),
+  uniqueIndex('idx_verifications_user_audit_finding').on(table.userId, table.auditId, table.findingId),
+  index('idx_verifications_finding_id').on(table.findingId),
   index('idx_verifications_user_id').on(table.userId),
 ]);
 
 export const outcomeFeeObligations = sqliteTable('outcome_fee_obligations', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  findingId: text('finding_id').notNull().references(() => findingOwnerships.findingId, { onDelete: 'cascade' }),
+  auditId: text('audit_id').references(() => audits.id, { onDelete: 'cascade' }),
+  findingId: text('finding_id').notNull(),
   verificationId: text('verification_id').notNull().references(() => verifications.id, { onDelete: 'cascade' }),
   verifiedAnnualizedSavingsUsd: real('verified_annualized_savings_usd').notNull(),
   feeAmountUsd: real('fee_amount_usd').notNull(),
@@ -104,8 +107,8 @@ export const outcomeFeeObligations = sqliteTable('outcome_fee_obligations', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 }, (table) => [
-  uniqueIndex('idx_outcome_fee_user_finding').on(table.userId, table.findingId),
-  uniqueIndex('idx_outcome_fee_finding_id').on(table.findingId),
+  uniqueIndex('idx_outcome_fee_user_audit_finding').on(table.userId, table.auditId, table.findingId),
+  index('idx_outcome_fee_finding_id').on(table.findingId),
   index('idx_outcome_fee_user_id').on(table.userId),
 ]);
 

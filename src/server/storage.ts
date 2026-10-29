@@ -288,47 +288,126 @@ export class ServerStorage implements IStorage {
   }
 
   // --- Authoritative Verification Operations ---
+  private verificationCompositeKey(userId: string, findingId: string, auditId?: string): string {
+    return auditId ? `${userId}:${auditId}:${findingId}` : `${userId}:${findingId}`;
+  }
+
+  private outcomeFeeCompositeKey(userId: string, findingId: string, auditId?: string): string {
+    return auditId ? `${userId}:${auditId}:${findingId}` : `${userId}:${findingId}`;
+  }
+
   async saveVerification(verification: AuthoritativeVerification): Promise<AuthoritativeVerification> {
+    const key = this.verificationCompositeKey(verification.user_id, verification.finding_id, verification.audit_id);
+    this.data.verifications[key] = verification;
     this.data.verifications[verification.finding_id] = verification;
     this.flushToDisk();
     return verification;
   }
 
-  async getVerificationByFindingId(findingId: string): Promise<AuthoritativeVerification | null> {
-    return this.data.verifications[findingId] || null;
+  async getVerificationByFindingId(findingId: string, userId?: string, auditId?: string): Promise<AuthoritativeVerification | null> {
+    if (userId && auditId) {
+      const compositeKey = this.verificationCompositeKey(userId, findingId, auditId);
+      if (this.data.verifications[compositeKey]) {
+        return this.data.verifications[compositeKey];
+      }
+    }
+    if (userId) {
+      const userKey = this.verificationCompositeKey(userId, findingId);
+      if (this.data.verifications[userKey]) {
+        return this.data.verifications[userKey];
+      }
+    }
+
+    const matches = Object.values(this.data.verifications).filter((v) => {
+      if (v.finding_id !== findingId) return false;
+      if (userId && v.user_id !== userId) return false;
+      if (auditId && v.audit_id && v.audit_id !== auditId) return false;
+      return true;
+    });
+
+    if (matches.length > 0) {
+      matches.sort((a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime());
+      return matches[0];
+    }
+
+    const legacy = this.data.verifications[findingId];
+    if (legacy && (!userId || legacy.user_id === userId) && (!auditId || !legacy.audit_id || legacy.audit_id === auditId)) {
+      return legacy;
+    }
+
+    return null;
   }
 
   // --- Outcome Fee Obligation Operations ---
   async createOutcomeFeeObligation(obligation: OutcomeFeeObligation): Promise<OutcomeFeeObligation> {
-    const existing = this.data.outcomeFeeObligations[obligation.finding_id];
+    const existing = await this.getOutcomeFeeObligation(obligation.finding_id, obligation.user_id, obligation.audit_id);
     if (existing) {
       return existing;
     }
+    const key = this.outcomeFeeCompositeKey(obligation.user_id, obligation.finding_id, obligation.audit_id);
+    this.data.outcomeFeeObligations[key] = obligation;
+    this.data.outcomeFeeObligationsById[obligation.id] = key;
     this.data.outcomeFeeObligations[obligation.finding_id] = obligation;
-    this.data.outcomeFeeObligationsById[obligation.id] = obligation.finding_id;
     this.flushToDisk();
     return obligation;
   }
 
-  async getOutcomeFeeObligation(findingId: string): Promise<OutcomeFeeObligation | null> {
-    return this.data.outcomeFeeObligations[findingId] || null;
+  async getOutcomeFeeObligation(findingId: string, userId?: string, auditId?: string): Promise<OutcomeFeeObligation | null> {
+    if (userId && auditId) {
+      const compositeKey = this.outcomeFeeCompositeKey(userId, findingId, auditId);
+      if (this.data.outcomeFeeObligations[compositeKey]) {
+        return this.data.outcomeFeeObligations[compositeKey];
+      }
+    }
+    if (userId) {
+      const userKey = this.outcomeFeeCompositeKey(userId, findingId);
+      if (this.data.outcomeFeeObligations[userKey]) {
+        return this.data.outcomeFeeObligations[userKey];
+      }
+    }
+
+    const matches = Object.values(this.data.outcomeFeeObligations).filter((ob) => {
+      if (ob.finding_id !== findingId) return false;
+      if (userId && ob.user_id !== userId) return false;
+      if (auditId && ob.audit_id && ob.audit_id !== auditId) return false;
+      return true;
+    });
+
+    if (matches.length > 0) {
+      matches.sort((a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime());
+      return matches[0];
+    }
+
+    const legacy = this.data.outcomeFeeObligations[findingId];
+    if (legacy && (!userId || legacy.user_id === userId) && (!auditId || !legacy.audit_id || legacy.audit_id === auditId)) {
+      return legacy;
+    }
+
+    return null;
   }
 
-  async getOutcomeFeeObligationById(obligationId: string): Promise<OutcomeFeeObligation | null> {
-    const findingId = this.data.outcomeFeeObligationsById[obligationId];
-    if (!findingId) return null;
-    return this.data.outcomeFeeObligations[findingId] || null;
+  async getOutcomeFeeObligationById(obligationId: string, userId?: string): Promise<OutcomeFeeObligation | null> {
+    let ob = Object.values(this.data.outcomeFeeObligations).find((o) => o.id === obligationId);
+    if (!ob) {
+      const key = this.data.outcomeFeeObligationsById[obligationId];
+      if (key) ob = this.data.outcomeFeeObligations[key];
+    }
+    if (!ob) return null;
+    if (userId && ob.user_id !== userId) return null;
+    return ob;
   }
 
   async updateOutcomeFeeObligation(obligation: OutcomeFeeObligation): Promise<OutcomeFeeObligation> {
+    const key = this.outcomeFeeCompositeKey(obligation.user_id, obligation.finding_id, obligation.audit_id);
+    this.data.outcomeFeeObligations[key] = obligation;
+    this.data.outcomeFeeObligationsById[obligation.id] = key;
     this.data.outcomeFeeObligations[obligation.finding_id] = obligation;
-    this.data.outcomeFeeObligationsById[obligation.id] = obligation.finding_id;
     this.flushToDisk();
     return obligation;
   }
 
-  async hasPaidOutcomeFee(userId: string, findingId: string): Promise<boolean> {
-    const ob = this.data.outcomeFeeObligations[findingId];
+  async hasPaidOutcomeFee(userId: string, findingId: string, auditId?: string): Promise<boolean> {
+    const ob = await this.getOutcomeFeeObligation(findingId, userId, auditId);
     return Boolean(ob && ob.user_id === userId && (ob.status === 'PAID' || ob.status === 'SETTLED'));
   }
 
