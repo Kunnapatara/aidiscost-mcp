@@ -176,7 +176,9 @@ export async function migrateJsonToSql(
         await tx
           .insert(schema.findingOwnerships)
           .values({
+            id: ownership.id || `${ownership.owner_id}:${ownership.finding_id}`,
             findingId: ownership.finding_id,
+            auditId: ownership.audit_id || null,
             ownerId: ownership.owner_id,
             createdAt: ownership.created_at || new Date().toISOString(),
           })

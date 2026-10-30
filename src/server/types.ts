@@ -36,7 +36,9 @@ export interface Entitlement {
 }
 
 export interface FindingOwnership {
+  id?: string;
   finding_id: string;
+  audit_id?: string;
   owner_id: string;
   created_at: string;
 }

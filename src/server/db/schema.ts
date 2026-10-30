@@ -25,10 +25,12 @@ export const sessions = sqliteTable('sessions', {
 
 export const findingOwnerships = sqliteTable('finding_ownerships', {
   findingId: text('finding_id').primaryKey(),
+  auditId: text('audit_id').references(() => audits.id, { onDelete: 'cascade' }),
   ownerId: text('owner_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   createdAt: text('created_at').notNull(),
 }, (table) => [
   index('idx_finding_ownerships_owner_id').on(table.ownerId),
+  index('idx_finding_ownerships_audit_id').on(table.auditId),
 ]);
 
 export const entitlements = sqliteTable('entitlements', {

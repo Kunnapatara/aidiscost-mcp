@@ -34,12 +34,13 @@ export interface IStorage {
   saveFinding(finding: PersistedFindingRecord): Promise<PersistedFindingRecord>;
   saveFindings(findings: PersistedFindingRecord[]): Promise<PersistedFindingRecord[]>;
   getFinding(auditId: string, findingId: string): Promise<PersistedFindingRecord | null>;
-  getFindingById(findingId: string, userId?: string): Promise<PersistedFindingRecord | null>;
+  getFindingById(findingId: string, userId?: string, auditId?: string): Promise<PersistedFindingRecord | null>;
+  findFindingsByFindingId(findingId: string, userId?: string): Promise<PersistedFindingRecord[]>;
   listAuditFindings(auditId: string): Promise<PersistedFindingRecord[]>;
 
   // --- Finding Ownership Operations ---
-  registerFindingOwnership(findingId: string, ownerId: string): Promise<FindingOwnership>;
-  getFindingOwner(findingId: string): Promise<string | null>;
+  registerFindingOwnership(findingId: string, ownerId: string, auditId?: string): Promise<FindingOwnership>;
+  getFindingOwner(findingId: string, auditId?: string, ownerId?: string): Promise<string | null>;
   listUserFindings(ownerId: string): Promise<string[]>;
 
   // --- Entitlement Operations ---

@@ -64,8 +64,9 @@ Verifies whether the requesting user owns active paid entitlements or outcome fe
 
 - **Parameters:**
   - `finding_id` (*string*, required): Target finding ID.
+  - `audit_id` (*string*, optional): Specific baseline audit ID. If omitted and multiple findings match across different audits for the user, returns a safe fail-closed `AMBIGUOUS_FINDING` error instructing the caller to supply `audit_id`.
 - **Security & Isolation:**
-  - Requires user authentication. Non-disclosing `FINDING_NOT_FOUND` response on ownership mismatch.
+  - Requires user authentication. Non-disclosing `FINDING_NOT_FOUND` response on ownership mismatch or unowned finding.
 - **Key Output Fields:** `finding_id`, `is_owner`, `fix_package.unlocked`, `outcome_fee` status and details.
 
 ### `evaluate_verification`

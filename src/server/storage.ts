@@ -78,6 +78,51 @@ export class ServerStorage implements IStorage {
           audits: parsed.audits || {},
           findings: parsed.findings || {},
         };
+
+        // Safely reconcile legacy records with NULL audit_id ONLY when exactly 1 distinct audit exists
+        const findingsList = Object.values(this.data.findings);
+        for (const v of Object.values(this.data.verifications)) {
+          if (!v.audit_id && v.user_id && v.finding_id) {
+            const audits = Array.from(
+              new Set(
+                findingsList
+                  .filter((f) => f.finding_id === v.finding_id && f.user_id === v.user_id)
+                  .map((f) => f.audit_id)
+              )
+            );
+            if (audits.length === 1) {
+              v.audit_id = audits[0];
+            }
+          }
+        }
+        for (const obl of Object.values(this.data.outcomeFeeObligations)) {
+          if (!obl.audit_id && obl.user_id && obl.finding_id) {
+            const audits = Array.from(
+              new Set(
+                findingsList
+                  .filter((f) => f.finding_id === obl.finding_id && f.user_id === obl.user_id)
+                  .map((f) => f.audit_id)
+              )
+            );
+            if (audits.length === 1) {
+              obl.audit_id = audits[0];
+            }
+          }
+        }
+        for (const fo of Object.values(this.data.findingOwnerships)) {
+          if (!fo.audit_id && fo.owner_id && fo.finding_id) {
+            const audits = Array.from(
+              new Set(
+                findingsList
+                  .filter((f) => f.finding_id === fo.finding_id && f.user_id === fo.owner_id)
+                  .map((f) => f.audit_id)
+              )
+            );
+            if (audits.length === 1) {
+              fo.audit_id = audits[0];
+            }
+          }
+        }
       }
     } catch (err) {
       // If disk read fails, fallback to clean memory store
@@ -220,14 +265,20 @@ export class ServerStorage implements IStorage {
   }
 
   // --- Finding Ownership Operations ---
-  async registerFindingOwnership(findingId: string, ownerId: string): Promise<FindingOwnership> {
+  async registerFindingOwnership(
+    findingId: string,
+    ownerId: string,
+    auditId?: string
+  ): Promise<FindingOwnership> {
     const existing = this.data.findingOwnerships[findingId];
     if (existing) {
       return existing;
     }
+
     const record: FindingOwnership = {
       finding_id: findingId,
       owner_id: ownerId,
+      audit_id: auditId,
       created_at: new Date().toISOString(),
     };
     this.data.findingOwnerships[findingId] = record;
@@ -235,15 +286,26 @@ export class ServerStorage implements IStorage {
     return record;
   }
 
-  async getFindingOwner(findingId: string): Promise<string | null> {
+  async getFindingOwner(
+    findingId: string,
+    auditId?: string,
+    ownerId?: string
+  ): Promise<string | null> {
     const record = this.data.findingOwnerships[findingId];
-    return record ? record.owner_id : null;
+    if (!record) return null;
+    if (ownerId && record.owner_id !== ownerId) return null;
+    if (auditId && record.audit_id && record.audit_id !== auditId) return null;
+    return record.owner_id;
   }
 
   async listUserFindings(ownerId: string): Promise<string[]> {
-    return Object.values(this.data.findingOwnerships)
-      .filter((fo) => fo.owner_id === ownerId)
-      .map((fo) => fo.finding_id);
+    return Array.from(
+      new Set(
+        Object.values(this.data.findingOwnerships)
+          .filter((fo) => fo.owner_id === ownerId)
+          .map((fo) => fo.finding_id)
+      )
+    );
   }
 
   // --- Entitlement Operations ---
@@ -311,31 +373,22 @@ export class ServerStorage implements IStorage {
         return this.data.verifications[compositeKey];
       }
     }
-    if (userId) {
-      const userKey = this.verificationCompositeKey(userId, findingId);
-      if (this.data.verifications[userKey]) {
-        return this.data.verifications[userKey];
-      }
+
+    const uniqueMap = new Map<string, AuthoritativeVerification>();
+    for (const v of Object.values(this.data.verifications)) {
+      if (v.finding_id !== findingId) continue;
+      if (userId && v.user_id !== userId) continue;
+      if (auditId && v.audit_id && v.audit_id !== auditId) continue;
+      uniqueMap.set(v.id, v);
     }
 
-    const matches = Object.values(this.data.verifications).filter((v) => {
-      if (v.finding_id !== findingId) return false;
-      if (userId && v.user_id !== userId) return false;
-      if (auditId && v.audit_id && v.audit_id !== auditId) return false;
-      return true;
-    });
-
-    if (matches.length > 0) {
-      matches.sort((a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime());
-      return matches[0];
+    const uniqueMatches = Array.from(uniqueMap.values());
+    if (uniqueMatches.length === 0) return null;
+    if (!auditId && uniqueMatches.length > 1) {
+      // Ambiguous: fail closed and do not guess latest
+      return null;
     }
-
-    const legacy = this.data.verifications[findingId];
-    if (legacy && (!userId || legacy.user_id === userId) && (!auditId || !legacy.audit_id || legacy.audit_id === auditId)) {
-      return legacy;
-    }
-
-    return null;
+    return uniqueMatches[0];
   }
 
   // --- Outcome Fee Obligation Operations ---
@@ -359,31 +412,22 @@ export class ServerStorage implements IStorage {
         return this.data.outcomeFeeObligations[compositeKey];
       }
     }
-    if (userId) {
-      const userKey = this.outcomeFeeCompositeKey(userId, findingId);
-      if (this.data.outcomeFeeObligations[userKey]) {
-        return this.data.outcomeFeeObligations[userKey];
-      }
+
+    const uniqueMap = new Map<string, OutcomeFeeObligation>();
+    for (const ob of Object.values(this.data.outcomeFeeObligations)) {
+      if (ob.finding_id !== findingId) continue;
+      if (userId && ob.user_id !== userId) continue;
+      if (auditId && ob.audit_id && ob.audit_id !== auditId) continue;
+      uniqueMap.set(ob.id, ob);
     }
 
-    const matches = Object.values(this.data.outcomeFeeObligations).filter((ob) => {
-      if (ob.finding_id !== findingId) return false;
-      if (userId && ob.user_id !== userId) return false;
-      if (auditId && ob.audit_id && ob.audit_id !== auditId) return false;
-      return true;
-    });
-
-    if (matches.length > 0) {
-      matches.sort((a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime());
-      return matches[0];
+    const uniqueMatches = Array.from(uniqueMap.values());
+    if (uniqueMatches.length === 0) return null;
+    if (!auditId && uniqueMatches.length > 1) {
+      // Ambiguous: fail closed and do not guess latest
+      return null;
     }
-
-    const legacy = this.data.outcomeFeeObligations[findingId];
-    if (legacy && (!userId || legacy.user_id === userId) && (!auditId || !legacy.audit_id || legacy.audit_id === auditId)) {
-      return legacy;
-    }
-
-    return null;
+    return uniqueMatches[0];
   }
 
   async getOutcomeFeeObligationById(obligationId: string, userId?: string): Promise<OutcomeFeeObligation | null> {
@@ -578,16 +622,30 @@ export class ServerStorage implements IStorage {
     return this.data.findings[key] || null;
   }
 
-  async getFindingById(findingId: string, userId?: string): Promise<PersistedFindingRecord | null> {
-    const matches = Object.values(this.data.findings).filter((f) => {
-      if (f.finding_id !== findingId) return false;
-      if (userId && f.user_id !== userId) return false;
-      return true;
-    });
+  async findFindingsByFindingId(findingId: string, userId?: string): Promise<PersistedFindingRecord[]> {
+    return Object.values(this.data.findings)
+      .filter((f) => {
+        if (f.finding_id !== findingId) return false;
+        if (userId && f.user_id !== userId) return false;
+        return true;
+      })
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  }
 
-    if (matches.length === 0) return null;
-    matches.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    return matches[0];
+  async getFindingById(findingId: string, userId?: string, auditId?: string): Promise<PersistedFindingRecord | null> {
+    if (auditId) {
+      const finding = await this.getFinding(auditId, findingId);
+      if (!finding) return null;
+      if (userId && finding.user_id !== userId) return null;
+      return finding;
+    }
+
+    const matches = await this.findFindingsByFindingId(findingId, userId);
+    if (matches.length === 1) {
+      return matches[0];
+    }
+    // Ambiguous (> 1) or not found (0): fail closed and do not guess latest
+    return null;
   }
 
   async listAuditFindings(auditId: string): Promise<PersistedFindingRecord[]> {

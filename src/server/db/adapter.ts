@@ -174,7 +174,11 @@ export class DrizzleStorageAdapter implements IStorage {
   }
 
   // --- Finding Ownership Operations ---
-  async registerFindingOwnership(findingId: string, ownerId: string): Promise<FindingOwnership> {
+  async registerFindingOwnership(
+    findingId: string,
+    ownerId: string,
+    auditId?: string
+  ): Promise<FindingOwnership> {
     const existing = await this.db
       .select()
       .from(schema.findingOwnerships)
@@ -183,7 +187,9 @@ export class DrizzleStorageAdapter implements IStorage {
 
     if (existing[0]) {
       return {
+        id: existing[0].findingId,
         finding_id: existing[0].findingId,
+        audit_id: existing[0].auditId || undefined,
         owner_id: existing[0].ownerId,
         created_at: existing[0].createdAt,
       };
@@ -194,6 +200,7 @@ export class DrizzleStorageAdapter implements IStorage {
       .insert(schema.findingOwnerships)
       .values({
         findingId,
+        auditId: auditId || null,
         ownerId,
         createdAt: now,
       })
@@ -205,21 +212,31 @@ export class DrizzleStorageAdapter implements IStorage {
       .where(eq(schema.findingOwnerships.findingId, findingId))
       .limit(1);
 
+    const record = current[0] || existing[0];
     return {
-      finding_id: current[0].findingId,
-      owner_id: current[0].ownerId,
-      created_at: current[0].createdAt,
+      id: record ? record.findingId : findingId,
+      finding_id: record ? record.findingId : findingId,
+      audit_id: record?.auditId || undefined,
+      owner_id: record ? record.ownerId : ownerId,
+      created_at: record ? record.createdAt : now,
     };
   }
 
-  async getFindingOwner(findingId: string): Promise<string | null> {
+  async getFindingOwner(
+    findingId: string,
+    auditId?: string,
+    ownerId?: string
+  ): Promise<string | null> {
     const rows = await this.db
-      .select({ ownerId: schema.findingOwnerships.ownerId })
+      .select({ ownerId: schema.findingOwnerships.ownerId, auditId: schema.findingOwnerships.auditId })
       .from(schema.findingOwnerships)
       .where(eq(schema.findingOwnerships.findingId, findingId))
       .limit(1);
 
-    return rows[0] ? rows[0].ownerId : null;
+    if (!rows[0]) return null;
+    if (ownerId && rows[0].ownerId !== ownerId) return null;
+    if (auditId && rows[0].auditId && rows[0].auditId !== auditId) return null;
+    return rows[0].ownerId;
   }
 
   async listUserFindings(ownerId: string): Promise<string[]> {
@@ -228,7 +245,7 @@ export class DrizzleStorageAdapter implements IStorage {
       .from(schema.findingOwnerships)
       .where(eq(schema.findingOwnerships.ownerId, ownerId));
 
-    return rows.map((r) => r.findingId);
+    return Array.from(new Set(rows.map((r) => r.findingId)));
   }
 
   // --- Entitlement Operations ---
@@ -418,10 +435,13 @@ export class DrizzleStorageAdapter implements IStorage {
       .select()
       .from(schema.verifications)
       .where(and(...conditions))
-      .orderBy(desc(schema.verifications.createdAt))
-      .limit(1);
+      .orderBy(desc(schema.verifications.createdAt));
 
-    if (!rows[0]) return null;
+    if (rows.length === 0) return null;
+    if (!auditId && rows.length > 1) {
+      // Ambiguous: fail closed and do not guess latest
+      return null;
+    }
     const r = rows[0];
 
     const originalEstimate = (typeof r.originalEstimatedAnnualizedUsd === 'number' && Number.isFinite(r.originalEstimatedAnnualizedUsd))
@@ -536,10 +556,13 @@ export class DrizzleStorageAdapter implements IStorage {
       .select()
       .from(schema.outcomeFeeObligations)
       .where(and(...conditions))
-      .orderBy(desc(schema.outcomeFeeObligations.createdAt))
-      .limit(1);
+      .orderBy(desc(schema.outcomeFeeObligations.createdAt));
 
-    if (!rows[0]) return null;
+    if (rows.length === 0) return null;
+    if (!auditId && rows.length > 1) {
+      // Ambiguous: fail closed and do not guess latest
+      return null;
+    }
     return this.mapOutcomeFeeObligation(rows[0]);
   }
 
@@ -1174,7 +1197,10 @@ export class DrizzleStorageAdapter implements IStorage {
     return this.mapFindingRow(rows[0]);
   }
 
-  async getFindingById(findingId: string, userId?: string): Promise<PersistedFindingRecord | null> {
+  async findFindingsByFindingId(
+    findingId: string,
+    userId?: string
+  ): Promise<PersistedFindingRecord[]> {
     const condition = userId
       ? and(eq(schema.findings.findingId, findingId), eq(schema.findings.userId, userId))
       : eq(schema.findings.findingId, findingId);
@@ -1183,11 +1209,29 @@ export class DrizzleStorageAdapter implements IStorage {
       .select()
       .from(schema.findings)
       .where(condition)
-      .orderBy(desc(schema.findings.createdAt))
-      .limit(1);
+      .orderBy(desc(schema.findings.createdAt));
 
-    if (!rows[0]) return null;
-    return this.mapFindingRow(rows[0]);
+    return rows.map((r) => this.mapFindingRow(r));
+  }
+
+  async getFindingById(
+    findingId: string,
+    userId?: string,
+    auditId?: string
+  ): Promise<PersistedFindingRecord | null> {
+    if (auditId) {
+      const finding = await this.getFinding(auditId, findingId);
+      if (!finding) return null;
+      if (userId && finding.user_id !== userId) return null;
+      return finding;
+    }
+
+    const matches = await this.findFindingsByFindingId(findingId, userId);
+    if (matches.length === 1) {
+      return matches[0];
+    }
+    // Ambiguous (> 1) or not found (0): fail closed and do not guess latest
+    return null;
   }
 
   async listAuditFindings(auditId: string): Promise<PersistedFindingRecord[]> {

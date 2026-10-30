@@ -248,70 +248,72 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
             }
           }
 
-          const totalFindings = auditSummary.findings.length;
-          if (auditSaved && (totalFindings === 0 || findingsSavedCount === totalFindings)) {
-            persistenceStatus = 'SUCCESS';
-          } else if (auditSaved || findingsSavedCount > 0) {
-            persistenceStatus = 'PARTIAL_SUCCESS';
-            persistenceWarning = `Audit persisted=${auditSaved}, findings persisted=${findingsSavedCount}/${totalFindings}.`;
-          } else {
-            persistenceStatus = 'FAILED';
-            persistenceWarning = 'Failed to persist audit and findings records.';
-          }
-        }
+          if (auditSummary.findings.length > 0) {
+            try {
+              for (const finding of auditSummary.findings) {
+                try {
+                  const currentOwner = await storage.getFindingOwner(finding.id);
+                  if (!currentOwner) {
+                    await storage.registerFindingOwnership(finding.id, user.id, auditSummary.id);
+                  } else if (currentOwner !== user.id) {
+                    conflictCount++;
+                    continue;
+                  }
 
-        if (user && auditSummary.findings.length > 0) {
-          try {
-            for (const finding of auditSummary.findings) {
-              try {
-                const currentOwner = await storage.getFindingOwner(finding.id);
-                if (!currentOwner) {
-                  await storage.registerFindingOwnership(finding.id, user.id);
-                } else if (currentOwner !== user.id) {
-                  // Do not overwrite ownership or disclose other user's identity
-                  conflictCount++;
-                  continue;
-                }
-
-                // Explicitly read back stored owner to verify persistence
-                const verifiedOwner = await storage.getFindingOwner(finding.id);
-                if (verifiedOwner === user.id) {
-                  confirmedCount++;
-                  verifiedOwnerFindingIds.add(finding.id);
-                } else {
+                  // Explicitly read back stored owner to verify persistence
+                  const verifiedOwner = await storage.getFindingOwner(finding.id);
+                  if (verifiedOwner === user.id) {
+                    confirmedCount++;
+                    verifiedOwnerFindingIds.add(finding.id);
+                  } else {
+                    failedCount++;
+                  }
+                } catch {
                   failedCount++;
                 }
-              } catch {
-                failedCount++;
               }
-            }
 
-            const totalFindings = auditSummary.findings.length;
-            if (confirmedCount === totalFindings && totalFindings > 0) {
-              ownershipConfirmed = true;
-              ownershipWarning = undefined;
-            } else {
-              ownershipConfirmed = false;
-
-              // Compose accurate warning message detailing all observed outcomes
-              if (conflictCount === totalFindings) {
-                ownershipWarning = 'All findings from this audit are already owned by another account and were not re-assigned.';
-              } else if (failedCount === totalFindings) {
-                ownershipWarning = `Ownership verification failed for ${failedCount} of ${totalFindings} findings.`;
-              } else if (conflictCount > 0 && failedCount > 0) {
-                const prefix = confirmedCount > 0 ? `${confirmedCount} registered to your account, ` : '';
-                ownershipWarning = `Partial ownership outcome: ${prefix}${conflictCount} already owned by another account, ownership verification failed for ${failedCount} finding${failedCount > 1 ? 's' : ''}.`;
-              } else if (conflictCount > 0 && confirmedCount > 0) {
-                ownershipWarning = `Partial ownership: ${confirmedCount} of ${totalFindings} findings registered to your account. ${conflictCount} findings are already owned by another account.`;
-              } else if (failedCount > 0) {
-                ownershipWarning = `Ownership verification failed for ${failedCount} of ${totalFindings} findings.`;
+              const totalFindings = auditSummary.findings.length;
+              if (confirmedCount === totalFindings && totalFindings > 0) {
+                ownershipConfirmed = true;
+                ownershipWarning = undefined;
               } else {
-                ownershipWarning = 'Failed to verify finding ownership records.';
+                ownershipConfirmed = false;
+
+                if (conflictCount === totalFindings) {
+                  ownershipWarning = 'All findings from this audit are already owned by another account and were not re-assigned.';
+                } else if (failedCount === totalFindings) {
+                  ownershipWarning = `Ownership verification failed for ${failedCount} of ${totalFindings} findings.`;
+                } else if (conflictCount > 0 && failedCount > 0) {
+                  const prefix = confirmedCount > 0 ? `${confirmedCount} registered to your account, ` : '';
+                  ownershipWarning = `Partial ownership outcome: ${prefix}${conflictCount} already owned by another account, ownership verification failed for ${failedCount} finding${failedCount > 1 ? 's' : ''}.`;
+                } else if (conflictCount > 0 && confirmedCount > 0) {
+                  ownershipWarning = `Partial ownership: ${confirmedCount} of ${totalFindings} findings registered to your account. ${conflictCount} findings are already owned by another account.`;
+                } else if (failedCount > 0) {
+                  ownershipWarning = `Ownership verification failed for ${failedCount} of ${totalFindings} findings.`;
+                } else {
+                  ownershipWarning = 'Failed to verify finding ownership records.';
+                }
               }
+            } catch {
+              ownershipConfirmed = false;
+              ownershipWarning = 'Failed to persist finding ownership records to database.';
             }
-          } catch {
-            ownershipConfirmed = false;
-            ownershipWarning = 'Failed to persist finding ownership records to database.';
+          }
+
+          const totalFindings = auditSummary.findings.length;
+          const allFindingsSaved = totalFindings === 0 || findingsSavedCount === totalFindings;
+          const allOwnershipConfirmed = totalFindings === 0 || confirmedCount === totalFindings;
+
+          if (auditSaved && allFindingsSaved && allOwnershipConfirmed) {
+            persistenceStatus = 'SUCCESS';
+            persistenceWarning = undefined;
+          } else if (auditSaved || findingsSavedCount > 0 || confirmedCount > 0) {
+            persistenceStatus = 'PARTIAL_SUCCESS';
+            persistenceWarning = `Audit persisted=${auditSaved}, findings persisted=${findingsSavedCount}/${totalFindings}, ownerships confirmed=${confirmedCount}/${totalFindings}.`;
+          } else {
+            persistenceStatus = 'FAILED';
+            persistenceWarning = 'Failed to persist audit, findings, or ownership records.';
           }
         }
 
@@ -415,11 +417,12 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         'Check entitlement and outcome-fee status for a specific finding. Requires authentication and finding ownership.',
       inputSchema: {
         finding_id: z.string(),
+        audit_id: z.string().optional(),
       },
     },
-    async (args: { finding_id: string }) => {
+    async (args: { finding_id: string; audit_id?: string }) => {
       try {
-        const { finding_id } = args;
+        const { finding_id, audit_id } = args;
 
         // Input validation
         if (!finding_id || typeof finding_id !== 'string' || !finding_id.trim()) {
@@ -454,44 +457,84 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         }
 
         // 2. Check ownership - must exist and belong to the authenticated user
-        const findingRecord = await storage.getFindingById(finding_id);
-        if (findingRecord && findingRecord.user_id !== user.id) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  error: 'FINDING_NOT_FOUND',
-                  message: 'Finding not found or access denied.',
-                }),
-              },
-            ],
-          };
-        }
-
-        const ownerId = await storage.getFindingOwner(finding_id);
-        const isOwner = (findingRecord && findingRecord.user_id === user.id) || (ownerId === user.id);
-        if (!isOwner) {
-          // Consistent non-disclosing response for unowned, non-existent, or mismatched findings
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  error: 'FINDING_NOT_FOUND',
-                  message: 'Finding not found or access denied.',
-                }),
-              },
-            ],
-          };
+        let findingRecord: PersistedFindingRecord | null = null;
+        if (audit_id) {
+          const audit = await storage.getAudit(audit_id);
+          if (!audit || audit.user_id !== user.id) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
+          findingRecord = await storage.getFinding(audit_id, finding_id);
+          if (!findingRecord || findingRecord.user_id !== user.id) {
+            const ownerId = await storage.getFindingOwner(finding_id, audit_id, user.id);
+            if (ownerId !== user.id) {
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: 'FINDING_NOT_FOUND',
+                      message: 'Finding not found or access denied.',
+                    }),
+                  },
+                ],
+              };
+            }
+          }
+        } else {
+          const userFindings = await storage.findFindingsByFindingId(finding_id, user.id);
+          if (userFindings.length > 1) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'AMBIGUOUS_FINDING',
+                    message:
+                      'Multiple findings match this finding ID across different audits. Please provide audit_id to disambiguate.',
+                  }),
+                },
+              ],
+            };
+          }
+          if (userFindings.length === 1) {
+            findingRecord = userFindings[0];
+          } else {
+            const ownerId = await storage.getFindingOwner(finding_id, undefined, user.id);
+            if (ownerId !== user.id) {
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: 'FINDING_NOT_FOUND',
+                      message: 'Finding not found or access denied.',
+                    }),
+                  },
+                ],
+              };
+            }
+          }
         }
 
         // 3. Query entitlement and outcome fee obligation
         const isPaid = await storage.hasActivePaidEntitlement(user.id, finding_id);
         const entitlement = await storage.getEntitlement(user.id, finding_id);
-        const obligation = await storage.getOutcomeFeeObligation(finding_id, user.id, findingRecord?.audit_id);
+        const resolvedAuditId = audit_id || findingRecord?.audit_id;
+        const obligation = await storage.getOutcomeFeeObligation(finding_id, user.id, resolvedAuditId);
 
         const responsePayload = {
           finding_id,
@@ -606,7 +649,23 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         if (audit_id) {
           findingRecord = await storage.getFinding(audit_id, finding_id);
         } else {
-          findingRecord = await storage.getFindingById(finding_id, user.id);
+          const userFindings = await storage.findFindingsByFindingId(finding_id, user.id);
+          if (userFindings.length > 1) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'AMBIGUOUS_FINDING',
+                    message:
+                      'Multiple findings match this finding ID across different audits. Please provide audit_id to disambiguate.',
+                  }),
+                },
+              ],
+            };
+          }
+          findingRecord = userFindings.length === 1 ? userFindings[0] : null;
         }
 
         // Must strictly exist and belong to the authenticated user
@@ -827,7 +886,23 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         if (audit_id) {
           findingRecord = await storage.getFinding(audit_id, finding_id);
         } else {
-          findingRecord = await storage.getFindingById(finding_id, user.id);
+          const userFindings = await storage.findFindingsByFindingId(finding_id, user.id);
+          if (userFindings.length > 1) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'AMBIGUOUS_FINDING',
+                    message:
+                      'Multiple findings match this finding ID across different audits. Please provide audit_id to disambiguate.',
+                  }),
+                },
+              ],
+            };
+          }
+          findingRecord = userFindings.length === 1 ? userFindings[0] : null;
         }
 
         // Must strictly exist and belong to the authenticated user

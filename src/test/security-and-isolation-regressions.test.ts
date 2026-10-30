@@ -469,5 +469,311 @@ describe('Security, Data Integrity & Persistence Regressions Test Suite', () => 
         assert.ok(parsed.persistence.warning);
       }
     });
+
+    it('returns PARTIAL_SUCCESS if ownership registration fails even if audit and findings saved', async () => {
+      const faultyStorage = Object.create(jsonStorage);
+      faultyStorage.registerFindingOwnership = async () => {
+        throw new Error('Lock timeout');
+      };
+
+      const server = createMcpServer(mockUserA, faultyStorage);
+      const tool = (server as any)._registeredTools['run_cost_audit'];
+      const result = await tool.handler({ telemetry_data: sampleCsv });
+
+      assert.strictEqual(result.isError, undefined);
+      const parsed = JSON.parse(result.content[0].text);
+      if (parsed.findings_count > 0) {
+        assert.strictEqual(parsed.persistence.status, 'PARTIAL_SUCCESS');
+        assert.strictEqual(parsed.persistence.audit_saved, true);
+        assert.strictEqual(parsed.persistence.findings_saved_count, parsed.findings_count);
+        assert.strictEqual(parsed.ownership.ownership_confirmed, false);
+      }
+    });
+  });
+
+  // =========================================================================
+  // TASK: Composite Finding Identity, Ambiguity Fail-Closed, & Reconciliation
+  // =========================================================================
+  describe('Composite Finding Identity, Ambiguity Fail-Closed, & Reconciliation', () => {
+    const sampleCsv = `timestamp,model,prompt_tokens,completion_tokens,cost_usd,application_id,status
+2026-10-01T10:00:00Z,gpt-4,100,50,0.01,app-1,SUCCESS
+2026-10-01T10:05:00Z,gpt-4,120,60,0.012,app-1,SUCCESS
+2026-10-01T10:10:00Z,gpt-4,150,70,0.015,app-1,SUCCESS`;
+
+    it('preserves finding ownership and prevents hijacking/overwriting across users (Drizzle & JSON)', async () => {
+      const findingId = 'fnd_shared_rule_01';
+      const auditA = 'aud_user_a_001';
+      const auditB = 'aud_user_b_001';
+
+      // JSON Storage
+      const regJsonA = await jsonStorage.registerFindingOwnership(findingId, mockUserA.id, auditA);
+      assert.strictEqual(regJsonA.owner_id, mockUserA.id);
+
+      // User B tries to claim existing finding -> original owner A is preserved
+      const regJsonB = await jsonStorage.registerFindingOwnership(findingId, mockUserB.id, auditB);
+      assert.strictEqual(regJsonB.owner_id, mockUserA.id, 'User A ownership must be preserved');
+
+      const ownerAJson = await jsonStorage.getFindingOwner(findingId, auditA, mockUserA.id);
+      assert.strictEqual(ownerAJson, mockUserA.id);
+
+      // Drizzle Storage (SQLite)
+      await drizzleStorage.saveAudit({
+        audit_id: auditA,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 100,
+        potential_savings_usd: 10,
+        annualized_savings_projection_usd: 120,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+
+      const regDrizA = await drizzleStorage.registerFindingOwnership(findingId, mockUserA.id, auditA);
+      assert.strictEqual(regDrizA.owner_id, mockUserA.id);
+
+      const regDrizB = await drizzleStorage.registerFindingOwnership(findingId, mockUserB.id, auditB);
+      assert.strictEqual(regDrizB.owner_id, mockUserA.id, 'User A ownership must be preserved');
+    });
+
+    it('returns AMBIGUOUS_FINDING when duplicate findings exist for user across audits and audit_id is omitted', async () => {
+      const findingId = 'fnd_model_overprovisioning';
+      const audit1 = 'aud_ambig_1';
+      const audit2 = 'aud_ambig_2';
+
+      await jsonStorage.saveAudit({
+        audit_id: audit1,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 500,
+        potential_savings_usd: 100,
+        annualized_savings_projection_usd: 1200,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: '2026-01-01T00:00:00.000Z',
+      });
+      await jsonStorage.saveAudit({
+        audit_id: audit2,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 600,
+        potential_savings_usd: 120,
+        annualized_savings_projection_usd: 1440,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: '2026-02-01T00:00:00.000Z',
+      });
+
+      await jsonStorage.saveFinding({
+        audit_id: audit1,
+        finding_id: findingId,
+        user_id: mockUserA.id,
+        rule_id: 'model_selection',
+        title: 'Overprovisioned Model in Audit 1',
+        summary: 'Audit 1 summary',
+        baseline_spend_usd: 500,
+        estimated_savings_usd: 100,
+        annualized_projection_usd: 1200,
+        eligible_event_count: 10,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: '2026-01-01T00:00:00.000Z',
+      });
+      await jsonStorage.saveFinding({
+        audit_id: audit2,
+        finding_id: findingId,
+        user_id: mockUserA.id,
+        rule_id: 'model_selection',
+        title: 'Overprovisioned Model in Audit 2',
+        summary: 'Audit 2 summary',
+        baseline_spend_usd: 600,
+        estimated_savings_usd: 120,
+        annualized_projection_usd: 1440,
+        eligible_event_count: 12,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: '2026-02-01T00:00:00.000Z',
+      });
+
+      const server = createMcpServer(mockUserA, jsonStorage);
+
+      // check_entitlement: without audit_id => AMBIGUOUS_FINDING
+      const checkTool = (server as any)._registeredTools['check_entitlement'];
+      const checkResNoAudit = await checkTool.handler({ finding_id: findingId });
+      assert.strictEqual(checkResNoAudit.isError, true);
+      const checkParsed = JSON.parse(checkResNoAudit.content[0].text);
+      assert.strictEqual(checkParsed.error, 'AMBIGUOUS_FINDING');
+
+      // check_entitlement: with audit_id => SUCCESS
+      const checkResWithAudit = await checkTool.handler({ finding_id: findingId, audit_id: audit1 });
+      assert.strictEqual(checkResWithAudit.isError, undefined);
+      const checkSuccessParsed = JSON.parse(checkResWithAudit.content[0].text);
+      assert.strictEqual(checkSuccessParsed.is_owner, true);
+
+      // get_finding_details: without audit_id => AMBIGUOUS_FINDING
+      const detailsTool = (server as any)._registeredTools['get_finding_details'];
+      const detailsResNoAudit = await detailsTool.handler({ finding_id: findingId });
+      assert.strictEqual(detailsResNoAudit.isError, true);
+      const detailsParsed = JSON.parse(detailsResNoAudit.content[0].text);
+      assert.strictEqual(detailsParsed.error, 'AMBIGUOUS_FINDING');
+
+      // get_finding_details: with audit_id => SUCCESS and returns the exact audit finding
+      const detailsResAudit1 = await detailsTool.handler({ finding_id: findingId, audit_id: audit1 });
+      assert.strictEqual(detailsResAudit1.isError, undefined);
+      const detailsParsed1 = JSON.parse(detailsResAudit1.content[0].text);
+      assert.strictEqual(detailsParsed1.audit_id, audit1);
+      assert.strictEqual(detailsParsed1.title, 'Overprovisioned Model in Audit 1');
+
+      // evaluate_verification: without audit_id => AMBIGUOUS_FINDING
+      const evalTool = (server as any)._registeredTools['evaluate_verification'];
+      const evalResNoAudit = await evalTool.handler({ finding_id: findingId, telemetry_data: sampleCsv });
+      assert.strictEqual(evalResNoAudit.isError, true);
+      const evalParsed = JSON.parse(evalResNoAudit.content[0].text);
+      assert.strictEqual(evalParsed.error, 'AMBIGUOUS_FINDING');
+
+      // evaluate_verification: with audit_id => SUCCESS
+      const evalResWithAudit = await evalTool.handler({
+        finding_id: findingId,
+        audit_id: audit1,
+        telemetry_data: sampleCsv,
+      });
+      assert.strictEqual(evalResWithAudit.isError, undefined);
+      const evalSuccess = JSON.parse(evalResWithAudit.content[0].text);
+      assert.strictEqual(evalSuccess.audit_id, audit1);
+    });
+
+    it('safely reconciles legacy verification records with NULL audit_id only when exactly 1 audit exists', async () => {
+      const { db, client } = createDatabaseConnection({ url: ':memory:' });
+      await initializeDatabaseSchema(client);
+      const storage = new DrizzleStorageAdapter(db, client);
+
+      await storage.createUser(mockUserA);
+
+      // Case 1: Unambiguous (User A has exactly 1 audit for fnd_unambig)
+      const auditSingle = 'aud_single';
+      await storage.saveAudit({
+        audit_id: auditSingle,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 100,
+        potential_savings_usd: 20,
+        annualized_savings_projection_usd: 240,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await storage.saveFinding({
+        audit_id: auditSingle,
+        finding_id: 'fnd_unambig',
+        user_id: mockUserA.id,
+        rule_id: 'caching',
+        title: 'Unambiguous Caching',
+        summary: 'Caching summary',
+        baseline_spend_usd: 100,
+        estimated_savings_usd: 20,
+        annualized_projection_usd: 240,
+        eligible_event_count: 5,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: new Date().toISOString(),
+      });
+
+      // Insert legacy verification with NULL audit_id directly via client batch
+      await client.batch(
+        [
+          `INSERT INTO verifications (
+            id, audit_id, finding_id, user_id, stage, is_authoritative, is_simulated,
+            baseline_start, baseline_end, baseline_sample_count, baseline_avg_cost_usd,
+            created_at, updated_at
+          ) VALUES (
+            'ver_legacy_unambig', NULL, 'fnd_unambig', '${mockUserA.id}', 'CUSTOMER_DEPLOYED', 0, 0,
+            '2026-01-01', '2026-01-07', 10, 0.05, '2026-01-08', '2026-01-08'
+          );`,
+        ],
+        'write'
+      );
+
+      // Case 2: Ambiguous (User A has 2 audits for fnd_ambig)
+      const auditMulti1 = 'aud_multi_1';
+      const auditMulti2 = 'aud_multi_2';
+      await storage.saveAudit({
+        audit_id: auditMulti1,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 100,
+        potential_savings_usd: 20,
+        annualized_savings_projection_usd: 240,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await storage.saveAudit({
+        audit_id: auditMulti2,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 150,
+        potential_savings_usd: 30,
+        annualized_savings_projection_usd: 360,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await storage.saveFinding({
+        audit_id: auditMulti1,
+        finding_id: 'fnd_ambig',
+        user_id: mockUserA.id,
+        rule_id: 'caching',
+        title: 'Ambiguous 1',
+        summary: 'Caching summary',
+        baseline_spend_usd: 100,
+        estimated_savings_usd: 20,
+        annualized_projection_usd: 240,
+        eligible_event_count: 5,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: new Date().toISOString(),
+      });
+      await storage.saveFinding({
+        audit_id: auditMulti2,
+        finding_id: 'fnd_ambig',
+        user_id: mockUserA.id,
+        rule_id: 'caching',
+        title: 'Ambiguous 2',
+        summary: 'Caching summary',
+        baseline_spend_usd: 150,
+        estimated_savings_usd: 30,
+        annualized_projection_usd: 360,
+        eligible_event_count: 5,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: new Date().toISOString(),
+      });
+
+      // Insert legacy verification with NULL audit_id for ambiguous finding
+      await client.batch(
+        [
+          `INSERT INTO verifications (
+            id, audit_id, finding_id, user_id, stage, is_authoritative, is_simulated,
+            baseline_start, baseline_end, baseline_sample_count, baseline_avg_cost_usd,
+            created_at, updated_at
+          ) VALUES (
+            'ver_legacy_ambig', NULL, 'fnd_ambig', '${mockUserA.id}', 'CUSTOMER_DEPLOYED', 0, 0,
+            '2026-01-01', '2026-01-07', 10, 0.05, '2026-01-08', '2026-01-08'
+          );`,
+        ],
+        'write'
+      );
+
+      // Now run schema initialization / reconciliation
+      await initializeDatabaseSchema(client);
+
+      // Verify Case 1 (unambiguous) was safely linked to auditSingle
+      const rowUnambig = await client.execute("SELECT id, audit_id FROM verifications WHERE id = 'ver_legacy_unambig'");
+      assert.strictEqual(rowUnambig.rows[0].audit_id, auditSingle);
+
+      // Verify Case 2 (ambiguous) remained NULL safely without guessing
+      const rowAmbig = await client.execute("SELECT id, audit_id FROM verifications WHERE id = 'ver_legacy_ambig'");
+      assert.strictEqual(rowAmbig.rows[0].audit_id, null);
+    });
   });
 });

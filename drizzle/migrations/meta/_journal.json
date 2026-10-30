@@ -43,6 +43,13 @@
       "when": 1790950000000,
       "tag": "0005_verification_and_outcome_fee_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1791000000000,
+      "tag": "0006_finding_ownership_and_reconciliation",
+      "breakpoints": true
     }
   ]
 }
