@@ -1039,6 +1039,7 @@ export class DrizzleStorageAdapter implements IStorage {
             entitlement: {
               id: existing.id,
               user_id: existing.userId,
+              audit_id: existing.auditId || undefined,
               finding_id: existing.findingId,
               type: existing.type as any,
               status: existing.status as any,
@@ -1077,6 +1078,7 @@ export class DrizzleStorageAdapter implements IStorage {
             entitlement: {
               id: existing.id,
               user_id: existing.userId,
+              audit_id: existing.auditId || undefined,
               finding_id: existing.findingId,
               type: existing.type as any,
               status: existing.status as any,
@@ -1107,6 +1109,7 @@ export class DrizzleStorageAdapter implements IStorage {
           entitlement: {
             id: existing.id,
             user_id: existing.userId,
+            audit_id: existing.auditId || undefined,
             finding_id: existing.findingId,
             type: existing.type as any,
             status: 'REVOKED',
