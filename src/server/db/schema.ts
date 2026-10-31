@@ -24,11 +24,14 @@ export const sessions = sqliteTable('sessions', {
 ]);
 
 export const findingOwnerships = sqliteTable('finding_ownerships', {
-  findingId: text('finding_id').primaryKey(),
+  id: text('id').primaryKey(),
+  findingId: text('finding_id').notNull(),
   auditId: text('audit_id').references(() => audits.id, { onDelete: 'cascade' }),
   ownerId: text('owner_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   createdAt: text('created_at').notNull(),
 }, (table) => [
+  uniqueIndex('idx_finding_ownerships_owner_audit_finding').on(table.ownerId, table.auditId, table.findingId),
+  index('idx_finding_ownerships_finding_id').on(table.findingId),
   index('idx_finding_ownerships_owner_id').on(table.ownerId),
   index('idx_finding_ownerships_audit_id').on(table.auditId),
 ]);
@@ -36,6 +39,7 @@ export const findingOwnerships = sqliteTable('finding_ownerships', {
 export const entitlements = sqliteTable('entitlements', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  auditId: text('audit_id').references(() => audits.id, { onDelete: 'cascade' }),
   findingId: text('finding_id').notNull(),
   type: text('type').notNull(), // 'PAID_FIX_PACKAGE' | 'DEMO_PREVIEW'
   status: text('status').notNull(), // 'ACTIVE' | 'REVOKED'
@@ -45,8 +49,10 @@ export const entitlements = sqliteTable('entitlements', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 }, (table) => [
-  uniqueIndex('idx_entitlements_user_finding').on(table.userId, table.findingId),
+  uniqueIndex('idx_entitlements_user_audit_finding').on(table.userId, table.auditId, table.findingId),
   index('idx_entitlements_user_id').on(table.userId),
+  index('idx_entitlements_finding_id').on(table.findingId),
+  index('idx_entitlements_audit_id').on(table.auditId),
 ]);
 
 export const webhookEvents = sqliteTable('webhook_events', {

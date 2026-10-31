@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { eq, and, or, desc } from 'drizzle-orm';
+import { eq, and, or, desc, isNull } from 'drizzle-orm';
 import { LibSQLDatabase } from 'drizzle-orm/libsql';
 import { Client } from '@libsql/client';
 import * as schema from './schema';
@@ -179,15 +179,23 @@ export class DrizzleStorageAdapter implements IStorage {
     ownerId: string,
     auditId?: string
   ): Promise<FindingOwnership> {
+    const id = auditId ? `${ownerId}:${auditId}:${findingId}` : `${ownerId}:${findingId}`;
+    const query = auditId
+      ? and(
+          eq(schema.findingOwnerships.findingId, findingId),
+          eq(schema.findingOwnerships.auditId, auditId)
+        )
+      : eq(schema.findingOwnerships.findingId, findingId);
+
     const existing = await this.db
       .select()
       .from(schema.findingOwnerships)
-      .where(eq(schema.findingOwnerships.findingId, findingId))
+      .where(query)
       .limit(1);
 
     if (existing[0]) {
       return {
-        id: existing[0].findingId,
+        id: existing[0].id || existing[0].findingId,
         finding_id: existing[0].findingId,
         audit_id: existing[0].auditId || undefined,
         owner_id: existing[0].ownerId,
@@ -199,6 +207,7 @@ export class DrizzleStorageAdapter implements IStorage {
     await this.db
       .insert(schema.findingOwnerships)
       .values({
+        id,
         findingId,
         auditId: auditId || null,
         ownerId,
@@ -209,12 +218,12 @@ export class DrizzleStorageAdapter implements IStorage {
     const current = await this.db
       .select()
       .from(schema.findingOwnerships)
-      .where(eq(schema.findingOwnerships.findingId, findingId))
+      .where(query)
       .limit(1);
 
     const record = current[0] || existing[0];
     return {
-      id: record ? record.findingId : findingId,
+      id: record ? (record.id || record.findingId) : id,
       finding_id: record ? record.findingId : findingId,
       audit_id: record?.auditId || undefined,
       owner_id: record ? record.ownerId : ownerId,
@@ -227,15 +236,52 @@ export class DrizzleStorageAdapter implements IStorage {
     auditId?: string,
     ownerId?: string
   ): Promise<string | null> {
-    const rows = await this.db
-      .select({ ownerId: schema.findingOwnerships.ownerId, auditId: schema.findingOwnerships.auditId })
-      .from(schema.findingOwnerships)
-      .where(eq(schema.findingOwnerships.findingId, findingId))
-      .limit(1);
+    if (auditId) {
+      const rows = await this.db
+        .select()
+        .from(schema.findingOwnerships)
+        .where(
+          and(
+            eq(schema.findingOwnerships.findingId, findingId),
+            eq(schema.findingOwnerships.auditId, auditId)
+          )
+        )
+        .limit(1);
 
-    if (!rows[0]) return null;
-    if (ownerId && rows[0].ownerId !== ownerId) return null;
-    if (auditId && rows[0].auditId && rows[0].auditId !== auditId) return null;
+      if (rows[0]) {
+        return rows[0].ownerId;
+      }
+
+      // Check legacy row with NULL audit_id
+      const legacyRows = await this.db
+        .select()
+        .from(schema.findingOwnerships)
+        .where(
+          and(
+            eq(schema.findingOwnerships.findingId, findingId),
+            isNull(schema.findingOwnerships.auditId)
+          )
+        )
+        .limit(2);
+
+      if (legacyRows.length === 1) {
+        return legacyRows[0].ownerId;
+      }
+      return null;
+    }
+
+    // No auditId provided: query all rows for findingId
+    const rows = await this.db
+      .select()
+      .from(schema.findingOwnerships)
+      .where(eq(schema.findingOwnerships.findingId, findingId));
+
+    if (rows.length === 0) return null;
+    if (rows.length > 1) {
+      // Multiple audits or owners: fail closed
+      return null;
+    }
+
     return rows[0].ownerId;
   }
 
@@ -250,7 +296,11 @@ export class DrizzleStorageAdapter implements IStorage {
 
   // --- Entitlement Operations ---
   async createEntitlement(entitlement: Entitlement): Promise<Entitlement> {
-    const existing = await this.getEntitlement(entitlement.user_id, entitlement.finding_id);
+    const existing = await this.getEntitlement(
+      entitlement.user_id,
+      entitlement.finding_id,
+      entitlement.audit_id
+    );
     if (
       existing &&
       existing.status === 'REVOKED' &&
@@ -259,11 +309,31 @@ export class DrizzleStorageAdapter implements IStorage {
       return existing; // Monotonic invariant
     }
 
+    if (existing) {
+      await this.updateEntitlement({
+        ...existing,
+        status: entitlement.status,
+        provider: entitlement.provider,
+        provider_transaction_id: entitlement.provider_transaction_id,
+        amount_usd: entitlement.amount_usd,
+        updated_at: entitlement.updated_at,
+      });
+      return {
+        ...existing,
+        status: entitlement.status,
+        provider: entitlement.provider,
+        provider_transaction_id: entitlement.provider_transaction_id,
+        amount_usd: entitlement.amount_usd,
+        updated_at: entitlement.updated_at,
+      };
+    }
+
     await this.db
       .insert(schema.entitlements)
       .values({
         id: entitlement.id,
         userId: entitlement.user_id,
+        auditId: entitlement.audit_id || null,
         findingId: entitlement.finding_id,
         type: entitlement.type,
         status: entitlement.status,
@@ -273,21 +343,23 @@ export class DrizzleStorageAdapter implements IStorage {
         createdAt: entitlement.created_at,
         updatedAt: entitlement.updated_at,
       })
-      .onConflictDoUpdate({
-        target: [schema.entitlements.userId, schema.entitlements.findingId],
-        set: {
-          status: entitlement.status,
-          provider: entitlement.provider,
-          providerTransactionId: entitlement.provider_transaction_id,
-          amountUsd: entitlement.amount_usd,
-          updatedAt: entitlement.updated_at,
-        },
-      });
+      .onConflictDoNothing();
 
     return entitlement;
   }
 
   async updateEntitlement(entitlement: Entitlement): Promise<Entitlement> {
+    const condition = entitlement.audit_id
+      ? and(
+          eq(schema.entitlements.userId, entitlement.user_id),
+          eq(schema.entitlements.findingId, entitlement.finding_id),
+          eq(schema.entitlements.auditId, entitlement.audit_id)
+        )
+      : and(
+          eq(schema.entitlements.userId, entitlement.user_id),
+          eq(schema.entitlements.findingId, entitlement.finding_id)
+        );
+
     await this.db
       .update(schema.entitlements)
       .set({
@@ -297,17 +369,77 @@ export class DrizzleStorageAdapter implements IStorage {
         amountUsd: entitlement.amount_usd,
         updatedAt: entitlement.updated_at,
       })
-      .where(
-        and(
-          eq(schema.entitlements.userId, entitlement.user_id),
-          eq(schema.entitlements.findingId, entitlement.finding_id)
-        )
-      );
+      .where(condition);
 
     return entitlement;
   }
 
-  async getEntitlement(userId: string, findingId: string): Promise<Entitlement | null> {
+  async getEntitlement(
+    userId: string,
+    findingId: string,
+    auditId?: string
+  ): Promise<Entitlement | null> {
+    if (auditId) {
+      const rows = await this.db
+        .select()
+        .from(schema.entitlements)
+        .where(
+          and(
+            eq(schema.entitlements.userId, userId),
+            eq(schema.entitlements.findingId, findingId),
+            eq(schema.entitlements.auditId, auditId)
+          )
+        )
+        .limit(1);
+
+      if (rows[0]) {
+        return {
+          id: rows[0].id,
+          user_id: rows[0].userId,
+          audit_id: rows[0].auditId || undefined,
+          finding_id: rows[0].findingId,
+          type: rows[0].type as any,
+          status: rows[0].status as any,
+          provider: rows[0].provider as any,
+          provider_transaction_id: rows[0].providerTransactionId,
+          amount_usd: rows[0].amountUsd,
+          created_at: rows[0].createdAt,
+          updated_at: rows[0].updatedAt,
+        };
+      }
+
+      // Check legacy row with NULL audit_id
+      const legacyRows = await this.db
+        .select()
+        .from(schema.entitlements)
+        .where(
+          and(
+            eq(schema.entitlements.userId, userId),
+            eq(schema.entitlements.findingId, findingId),
+            isNull(schema.entitlements.auditId)
+          )
+        )
+        .limit(2);
+
+      if (legacyRows.length === 1) {
+        return {
+          id: legacyRows[0].id,
+          user_id: legacyRows[0].userId,
+          audit_id: undefined,
+          finding_id: legacyRows[0].findingId,
+          type: legacyRows[0].type as any,
+          status: legacyRows[0].status as any,
+          provider: legacyRows[0].provider as any,
+          provider_transaction_id: legacyRows[0].providerTransactionId,
+          amount_usd: legacyRows[0].amountUsd,
+          created_at: legacyRows[0].createdAt,
+          updated_at: legacyRows[0].updatedAt,
+        };
+      }
+      return null;
+    }
+
+    // No auditId provided
     const rows = await this.db
       .select()
       .from(schema.entitlements)
@@ -316,14 +448,18 @@ export class DrizzleStorageAdapter implements IStorage {
           eq(schema.entitlements.userId, userId),
           eq(schema.entitlements.findingId, findingId)
         )
-      )
-      .limit(1);
+      );
 
-    if (!rows[0]) return null;
+    if (rows.length === 0) return null;
+    if (rows.length > 1) {
+      // Ambiguous entitlement across multiple audits: fail closed
+      return null;
+    }
 
     return {
       id: rows[0].id,
       user_id: rows[0].userId,
+      audit_id: rows[0].auditId || undefined,
       finding_id: rows[0].findingId,
       type: rows[0].type as any,
       status: rows[0].status as any,
@@ -335,8 +471,12 @@ export class DrizzleStorageAdapter implements IStorage {
     };
   }
 
-  async hasActivePaidEntitlement(userId: string, findingId: string): Promise<boolean> {
-    const entitlement = await this.getEntitlement(userId, findingId);
+  async hasActivePaidEntitlement(
+    userId: string,
+    findingId: string,
+    auditId?: string
+  ): Promise<boolean> {
+    const entitlement = await this.getEntitlement(userId, findingId, auditId);
     return Boolean(
       entitlement &&
       entitlement.type === 'PAID_FIX_PACKAGE' &&
@@ -704,15 +844,21 @@ export class DrizzleStorageAdapter implements IStorage {
           processedAt: params.event.processed_at,
         });
 
+        const entitlementQuery = params.entitlement.audit_id
+          ? and(
+              eq(schema.entitlements.userId, params.entitlement.user_id),
+              eq(schema.entitlements.findingId, params.entitlement.finding_id),
+              eq(schema.entitlements.auditId, params.entitlement.audit_id)
+            )
+          : and(
+              eq(schema.entitlements.userId, params.entitlement.user_id),
+              eq(schema.entitlements.findingId, params.entitlement.finding_id)
+            );
+
         const existingEntitlementRows = await tx
           .select()
           .from(schema.entitlements)
-          .where(
-            and(
-              eq(schema.entitlements.userId, params.entitlement.user_id),
-              eq(schema.entitlements.findingId, params.entitlement.finding_id)
-            )
-          )
+          .where(entitlementQuery)
           .limit(1);
 
         if (
@@ -726,30 +872,35 @@ export class DrizzleStorageAdapter implements IStorage {
           return { status: 'SUCCESS' };
         }
 
-        await tx
-          .insert(schema.entitlements)
-          .values({
-            id: params.entitlement.id,
-            userId: params.entitlement.user_id,
-            findingId: params.entitlement.finding_id,
-            type: params.entitlement.type,
-            status: params.entitlement.status,
-            provider: params.entitlement.provider,
-            providerTransactionId: params.entitlement.provider_transaction_id,
-            amountUsd: params.entitlement.amount_usd,
-            createdAt: params.entitlement.created_at,
-            updatedAt: params.entitlement.updated_at,
-          })
-          .onConflictDoUpdate({
-            target: [schema.entitlements.userId, schema.entitlements.findingId],
-            set: {
+        if (existingEntitlementRows[0]) {
+          await tx
+            .update(schema.entitlements)
+            .set({
               status: params.entitlement.status,
               provider: params.entitlement.provider,
               providerTransactionId: params.entitlement.provider_transaction_id,
               amountUsd: params.entitlement.amount_usd,
               updatedAt: params.entitlement.updated_at,
-            },
-          });
+            })
+            .where(eq(schema.entitlements.id, existingEntitlementRows[0].id));
+        } else {
+          await tx
+            .insert(schema.entitlements)
+            .values({
+              id: params.entitlement.id,
+              userId: params.entitlement.user_id,
+              auditId: params.entitlement.audit_id || null,
+              findingId: params.entitlement.finding_id,
+              type: params.entitlement.type,
+              status: params.entitlement.status,
+              provider: params.entitlement.provider,
+              providerTransactionId: params.entitlement.provider_transaction_id,
+              amountUsd: params.entitlement.amount_usd,
+              createdAt: params.entitlement.created_at,
+              updatedAt: params.entitlement.updated_at,
+            })
+            .onConflictDoNothing();
+        }
 
         this.processedWebhooksCache.add(params.event.event_id);
         this.inFlightWebhooks.delete(params.event.event_id);
@@ -799,6 +950,7 @@ export class DrizzleStorageAdapter implements IStorage {
     userId: string;
     findingId: string;
     orderId: string;
+    auditId?: string;
   }): Promise<{ status: 'SUCCESS' | 'DUPLICATE' | 'NOT_FOUND' | 'MISMATCH'; entitlement?: Entitlement }> {
     if (this.processedWebhooksCache.has(params.event.event_id)) {
       this.inFlightWebhooks.delete(params.event.event_id);
@@ -819,15 +971,21 @@ export class DrizzleStorageAdapter implements IStorage {
           return { status: 'DUPLICATE' };
         }
 
+        const refundQuery = params.auditId
+          ? and(
+              eq(schema.entitlements.userId, params.userId),
+              eq(schema.entitlements.findingId, params.findingId),
+              eq(schema.entitlements.auditId, params.auditId)
+            )
+          : and(
+              eq(schema.entitlements.userId, params.userId),
+              eq(schema.entitlements.findingId, params.findingId)
+            );
+
         const existingEntitlementRows = await tx
           .select()
           .from(schema.entitlements)
-          .where(
-            and(
-              eq(schema.entitlements.userId, params.userId),
-              eq(schema.entitlements.findingId, params.findingId)
-            )
-          )
+          .where(refundQuery)
           .limit(1);
 
         if (!existingEntitlementRows[0]) {

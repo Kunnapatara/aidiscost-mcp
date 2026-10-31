@@ -252,7 +252,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
             try {
               for (const finding of auditSummary.findings) {
                 try {
-                  const currentOwner = await storage.getFindingOwner(finding.id);
+                  const currentOwner = await storage.getFindingOwner(finding.id, auditSummary.id);
                   if (!currentOwner) {
                     await storage.registerFindingOwnership(finding.id, user.id, auditSummary.id);
                   } else if (currentOwner !== user.id) {
@@ -261,7 +261,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
                   }
 
                   // Explicitly read back stored owner to verify persistence
-                  const verifiedOwner = await storage.getFindingOwner(finding.id);
+                  const verifiedOwner = await storage.getFindingOwner(finding.id, auditSummary.id, user.id);
                   if (verifiedOwner === user.id) {
                     confirmedCount++;
                     verifiedOwnerFindingIds.add(finding.id);
@@ -531,9 +531,9 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         }
 
         // 3. Query entitlement and outcome fee obligation
-        const isPaid = await storage.hasActivePaidEntitlement(user.id, finding_id);
-        const entitlement = await storage.getEntitlement(user.id, finding_id);
         const resolvedAuditId = audit_id || findingRecord?.audit_id;
+        const isPaid = await storage.hasActivePaidEntitlement(user.id, finding_id, resolvedAuditId);
+        const entitlement = await storage.getEntitlement(user.id, finding_id, resolvedAuditId);
         const obligation = await storage.getOutcomeFeeObligation(finding_id, user.id, resolvedAuditId);
 
         const responsePayload = {
@@ -703,7 +703,11 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           }
         }
 
-        const isPaid = await storage.hasActivePaidEntitlement(user.id, findingRecord.finding_id);
+        const isPaid = await storage.hasActivePaidEntitlement(
+          user.id,
+          findingRecord.finding_id,
+          findingRecord.audit_id
+        );
         const domainFinding = persistedFindingToDomain(findingRecord);
         const fixPackage = generateFixPackage(domainFinding, isPaid);
 

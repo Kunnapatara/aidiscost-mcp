@@ -9,7 +9,7 @@ import { ServerStorage } from '../server/storage';
 import { createDatabaseConnection, initializeDatabaseSchema } from '../server/db/index';
 import { DrizzleStorageAdapter } from '../server/db/adapter';
 import { createMcpServer } from '../server/mcp/server';
-import { User, PersistedAuditRecord, PersistedFindingRecord, AuthoritativeVerification, OutcomeFeeObligation } from '../server/types';
+import { User, PersistedAuditRecord, PersistedFindingRecord, AuthoritativeVerification, OutcomeFeeObligation, Entitlement } from '../server/types';
 
 describe('Security, Data Integrity & Persistence Regressions Test Suite', () => {
   let jsonStorage: ServerStorage;
@@ -509,12 +509,18 @@ describe('Security, Data Integrity & Persistence Regressions Test Suite', () => 
       const regJsonA = await jsonStorage.registerFindingOwnership(findingId, mockUserA.id, auditA);
       assert.strictEqual(regJsonA.owner_id, mockUserA.id);
 
-      // User B tries to claim existing finding -> original owner A is preserved
-      const regJsonB = await jsonStorage.registerFindingOwnership(findingId, mockUserB.id, auditB);
-      assert.strictEqual(regJsonB.owner_id, mockUserA.id, 'User A ownership must be preserved');
+      // User B tries to claim existing finding in audit A -> original owner A is preserved
+      const regJsonB = await jsonStorage.registerFindingOwnership(findingId, mockUserB.id, auditA);
+      assert.strictEqual(regJsonB.owner_id, mockUserA.id, 'User A ownership must be preserved in audit A');
 
-      const ownerAJson = await jsonStorage.getFindingOwner(findingId, auditA, mockUserA.id);
+      // User B registers same finding ID in audit B -> isolated ownership for User B
+      const regJsonB2 = await jsonStorage.registerFindingOwnership(findingId, mockUserB.id, auditB);
+      assert.strictEqual(regJsonB2.owner_id, mockUserB.id, 'User B has isolated ownership in audit B');
+
+      const ownerAJson = await jsonStorage.getFindingOwner(findingId, auditA);
       assert.strictEqual(ownerAJson, mockUserA.id);
+      const ownerBJson = await jsonStorage.getFindingOwner(findingId, auditB);
+      assert.strictEqual(ownerBJson, mockUserB.id);
 
       // Drizzle Storage (SQLite)
       await drizzleStorage.saveAudit({
@@ -528,12 +534,33 @@ describe('Security, Data Integrity & Persistence Regressions Test Suite', () => 
         findings_count: 1,
         created_at: new Date().toISOString(),
       });
+      await drizzleStorage.saveAudit({
+        audit_id: auditB,
+        user_id: mockUserB.id,
+        source: 'langfuse',
+        total_spend_usd: 100,
+        potential_savings_usd: 10,
+        annualized_savings_projection_usd: 120,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
 
       const regDrizA = await drizzleStorage.registerFindingOwnership(findingId, mockUserA.id, auditA);
       assert.strictEqual(regDrizA.owner_id, mockUserA.id);
 
-      const regDrizB = await drizzleStorage.registerFindingOwnership(findingId, mockUserB.id, auditB);
-      assert.strictEqual(regDrizB.owner_id, mockUserA.id, 'User A ownership must be preserved');
+      // User B tries to claim existing finding in audit A -> original owner A is preserved
+      const regDrizB = await drizzleStorage.registerFindingOwnership(findingId, mockUserB.id, auditA);
+      assert.strictEqual(regDrizB.owner_id, mockUserA.id, 'User A ownership must be preserved in audit A');
+
+      // User B registers same finding ID in audit B -> isolated ownership for User B
+      const regDrizB2 = await drizzleStorage.registerFindingOwnership(findingId, mockUserB.id, auditB);
+      assert.strictEqual(regDrizB2.owner_id, mockUserB.id, 'User B has isolated ownership in audit B');
+
+      const ownerADriz = await drizzleStorage.getFindingOwner(findingId, auditA);
+      assert.strictEqual(ownerADriz, mockUserA.id);
+      const ownerBDriz = await drizzleStorage.getFindingOwner(findingId, auditB);
+      assert.strictEqual(ownerBDriz, mockUserB.id);
     });
 
     it('returns AMBIGUOUS_FINDING when duplicate findings exist for user across audits and audit_id is omitted', async () => {
@@ -776,4 +803,228 @@ describe('Security, Data Integrity & Persistence Regressions Test Suite', () => 
       assert.strictEqual(rowAmbig.rows[0].audit_id, null);
     });
   });
+
+  // =========================================================================
+  // TASK 4: Audit-Scoped Finding Ownership & Entitlement Isolation Regressions
+  // =========================================================================
+  describe('Task 4: Audit-Scoped Finding Ownership & Entitlement Isolation Regressions', () => {
+    it('allows same finding ID across distinct audits and users without collision (Drizzle & JSON)', async () => {
+      const sharedFindingId = 'fnd_model_right_sizing_shared';
+      const auditA1 = 'aud_a_100';
+      const auditA2 = 'aud_a_200';
+      const auditB1 = 'aud_b_100';
+
+      // JSON Storage: Same finding in Audit A1 (User A), Audit A2 (User A), Audit B1 (User B)
+      const regJsonA1 = await jsonStorage.registerFindingOwnership(sharedFindingId, mockUserA.id, auditA1);
+      const regJsonA2 = await jsonStorage.registerFindingOwnership(sharedFindingId, mockUserA.id, auditA2);
+      const regJsonB1 = await jsonStorage.registerFindingOwnership(sharedFindingId, mockUserB.id, auditB1);
+
+      assert.strictEqual(regJsonA1.owner_id, mockUserA.id);
+      assert.strictEqual(regJsonA2.owner_id, mockUserA.id);
+      assert.strictEqual(regJsonB1.owner_id, mockUserB.id);
+
+      assert.strictEqual(await jsonStorage.getFindingOwner(sharedFindingId, auditA1), mockUserA.id);
+      assert.strictEqual(await jsonStorage.getFindingOwner(sharedFindingId, auditA2), mockUserA.id);
+      assert.strictEqual(await jsonStorage.getFindingOwner(sharedFindingId, auditB1), mockUserB.id);
+
+      // Drizzle Storage (LibSQL/SQLite): Verify scoped identity insert without primary key collision
+      await drizzleStorage.saveAudit({
+        audit_id: auditA1,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 100,
+        potential_savings_usd: 10,
+        annualized_savings_projection_usd: 120,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await drizzleStorage.saveAudit({
+        audit_id: auditA2,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 200,
+        potential_savings_usd: 20,
+        annualized_savings_projection_usd: 240,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await drizzleStorage.saveAudit({
+        audit_id: auditB1,
+        user_id: mockUserB.id,
+        source: 'langfuse',
+        total_spend_usd: 300,
+        potential_savings_usd: 30,
+        annualized_savings_projection_usd: 360,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+
+      const regDrizA1 = await drizzleStorage.registerFindingOwnership(sharedFindingId, mockUserA.id, auditA1);
+      const regDrizA2 = await drizzleStorage.registerFindingOwnership(sharedFindingId, mockUserA.id, auditA2);
+      const regDrizB1 = await drizzleStorage.registerFindingOwnership(sharedFindingId, mockUserB.id, auditB1);
+
+      assert.strictEqual(regDrizA1.owner_id, mockUserA.id);
+      assert.strictEqual(regDrizA2.owner_id, mockUserA.id);
+      assert.strictEqual(regDrizB1.owner_id, mockUserB.id);
+
+      assert.strictEqual(await drizzleStorage.getFindingOwner(sharedFindingId, auditA1), mockUserA.id);
+      assert.strictEqual(await drizzleStorage.getFindingOwner(sharedFindingId, auditA2), mockUserA.id);
+      assert.strictEqual(await drizzleStorage.getFindingOwner(sharedFindingId, auditB1), mockUserB.id);
+    });
+
+    it('entitlement purchased for Finding 1 in Audit A does NOT entitle Finding 1 in Audit B', async () => {
+      const findingId = 'fnd_entitlement_isolation_01';
+      const auditA = 'aud_entitle_a';
+      const auditB = 'aud_entitle_b';
+
+      // Create Fix Package entitlement ($49) for Finding in Audit A
+      await jsonStorage.createEntitlement({
+        id: 'ent_audit_a_01',
+        user_id: mockUserA.id,
+        audit_id: auditA,
+        finding_id: findingId,
+        type: 'PAID_FIX_PACKAGE',
+        status: 'ACTIVE',
+        provider: 'LEMON_SQUEEZY',
+        provider_transaction_id: 'ord_ls_audit_a_123',
+        amount_usd: 49.0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      // Audit A must be entitled
+      const hasPaidA = await jsonStorage.hasActivePaidEntitlement(mockUserA.id, findingId, auditA);
+      assert.strictEqual(hasPaidA, true, 'Audit A finding must be entitled');
+
+      // Audit B must NOT be entitled
+      const hasPaidB = await jsonStorage.hasActivePaidEntitlement(mockUserA.id, findingId, auditB);
+      assert.strictEqual(hasPaidB, false, 'Audit B finding must NOT be entitled');
+
+      // User B in Audit A must NOT be entitled
+      const hasPaidUserB = await jsonStorage.hasActivePaidEntitlement(mockUserB.id, findingId, auditA);
+      assert.strictEqual(hasPaidUserB, false, 'User B must NOT be entitled');
+
+      // Repeat test for DrizzleStorageAdapter
+      await drizzleStorage.saveAudit({
+        audit_id: auditA,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 100,
+        potential_savings_usd: 10,
+        annualized_savings_projection_usd: 120,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await drizzleStorage.saveAudit({
+        audit_id: auditB,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 100,
+        potential_savings_usd: 10,
+        annualized_savings_projection_usd: 120,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+
+      await drizzleStorage.createEntitlement({
+        id: 'ent_driz_a_01',
+        user_id: mockUserA.id,
+        audit_id: auditA,
+        finding_id: findingId,
+        type: 'PAID_FIX_PACKAGE',
+        status: 'ACTIVE',
+        provider: 'LEMON_SQUEEZY',
+        provider_transaction_id: 'ord_driz_audit_a_123',
+        amount_usd: 49.0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      assert.strictEqual(await drizzleStorage.hasActivePaidEntitlement(mockUserA.id, findingId, auditA), true);
+      assert.strictEqual(await drizzleStorage.hasActivePaidEntitlement(mockUserA.id, findingId, auditB), false);
+      assert.strictEqual(await drizzleStorage.hasActivePaidEntitlement(mockUserB.id, findingId, auditA), false);
+    });
+
+    it('webhook processing preserves and scopes entitlement by audit_id', async () => {
+      const findingId = 'fnd_webhook_scoped_01';
+      const auditId = 'aud_webhook_test_01';
+      const orderId = 'ord_lemon_scoped_999';
+
+      const webhookEvent = {
+        event_id: 'evt_scoped_order_created_01',
+        event_name: 'order_created',
+        provider: 'LEMON_SQUEEZY' as const,
+        payload_hash: 'hash_test_scoped',
+        processed_at: new Date().toISOString(),
+      };
+
+      // Fulfill order_created transaction in Drizzle with audit_id
+      await drizzleStorage.saveAudit({
+        audit_id: auditId,
+        user_id: mockUserA.id,
+        source: 'langfuse',
+        total_spend_usd: 100,
+        potential_savings_usd: 10,
+        annualized_savings_projection_usd: 120,
+        is_sample_data: false,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+
+      const entitlementToCreate: Entitlement = {
+        id: 'ent_webhook_01',
+        user_id: mockUserA.id,
+        audit_id: auditId,
+        finding_id: findingId,
+        type: 'PAID_FIX_PACKAGE',
+        status: 'ACTIVE',
+        provider: 'LEMON_SQUEEZY',
+        provider_transaction_id: orderId,
+        amount_usd: 49.0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      const result = await drizzleStorage.processOrderCreatedWebhookTransaction({
+        event: webhookEvent,
+        entitlement: entitlementToCreate,
+      });
+
+      assert.strictEqual(result.status, 'SUCCESS');
+      const retrieved = await drizzleStorage.getEntitlement(mockUserA.id, findingId, auditId);
+      assert.strictEqual(retrieved?.audit_id, auditId);
+      assert.strictEqual(retrieved?.status, 'ACTIVE');
+
+      // Verify entitlement exists only for auditId
+      assert.strictEqual(await drizzleStorage.hasActivePaidEntitlement(mockUserA.id, findingId, auditId), true);
+      assert.strictEqual(await drizzleStorage.hasActivePaidEntitlement(mockUserA.id, findingId, 'aud_other'), false);
+
+      // Refund webhook transaction for auditId
+      const refundEvent = {
+        event_id: 'evt_scoped_order_refunded_01',
+        event_name: 'order_refunded',
+        provider: 'LEMON_SQUEEZY' as const,
+        payload_hash: 'hash_test_refund',
+        processed_at: new Date().toISOString(),
+      };
+
+      const refundResult = await drizzleStorage.processOrderRefundedWebhookTransaction({
+        event: refundEvent,
+        userId: mockUserA.id,
+        findingId,
+        orderId,
+        auditId,
+      });
+
+      assert.strictEqual(refundResult.status, 'SUCCESS');
+      assert.strictEqual(refundResult.entitlement?.status, 'REVOKED');
+      assert.strictEqual(await drizzleStorage.hasActivePaidEntitlement(mockUserA.id, findingId, auditId), false);
+    });
+  });
 });
+

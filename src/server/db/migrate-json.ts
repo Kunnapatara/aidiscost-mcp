@@ -176,7 +176,7 @@ export async function migrateJsonToSql(
         await tx
           .insert(schema.findingOwnerships)
           .values({
-            id: ownership.id || `${ownership.owner_id}:${ownership.finding_id}`,
+            id: ownership.id || (ownership.audit_id ? `${ownership.owner_id}:${ownership.audit_id}:${ownership.finding_id}` : `${ownership.owner_id}:${ownership.finding_id}`),
             findingId: ownership.finding_id,
             auditId: ownership.audit_id || null,
             ownerId: ownership.owner_id,
@@ -192,6 +192,7 @@ export async function migrateJsonToSql(
           .values({
             id: entitlement.id,
             userId: entitlement.user_id,
+            auditId: entitlement.audit_id || null,
             findingId: entitlement.finding_id,
             type: entitlement.type,
             status: entitlement.status,

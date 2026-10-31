@@ -46,8 +46,8 @@ export interface IStorage {
   // --- Entitlement Operations ---
   createEntitlement(entitlement: Entitlement): Promise<Entitlement>;
   updateEntitlement?(entitlement: Entitlement): Promise<Entitlement>;
-  getEntitlement(userId: string, findingId: string): Promise<Entitlement | null>;
-  hasActivePaidEntitlement(userId: string, findingId: string): Promise<boolean>;
+  getEntitlement(userId: string, findingId: string, auditId?: string): Promise<Entitlement | null>;
+  hasActivePaidEntitlement(userId: string, findingId: string, auditId?: string): Promise<boolean>;
 
   // --- Authoritative Verification Operations ---
   saveVerification(verification: AuthoritativeVerification): Promise<AuthoritativeVerification>;
@@ -85,6 +85,7 @@ export interface IStorage {
     userId: string;
     findingId: string;
     orderId: string;
+    auditId?: string;
   }): Promise<{ status: 'SUCCESS' | 'DUPLICATE' | 'NOT_FOUND' | 'MISMATCH'; entitlement?: Entitlement }>;
 
   /**

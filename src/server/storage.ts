@@ -123,6 +123,20 @@ export class ServerStorage implements IStorage {
             }
           }
         }
+        for (const ent of Object.values(this.data.entitlements)) {
+          if (!ent.audit_id && ent.user_id && ent.finding_id) {
+            const audits = Array.from(
+              new Set(
+                findingsList
+                  .filter((f) => f.finding_id === ent.finding_id && f.user_id === ent.user_id)
+                  .map((f) => f.audit_id)
+              )
+            );
+            if (audits.length === 1) {
+              ent.audit_id = audits[0];
+            }
+          }
+        }
       }
     } catch (err) {
       // If disk read fails, fallback to clean memory store
@@ -270,18 +284,33 @@ export class ServerStorage implements IStorage {
     ownerId: string,
     auditId?: string
   ): Promise<FindingOwnership> {
-    const existing = this.data.findingOwnerships[findingId];
-    if (existing) {
-      return existing;
+    const allOwnerships = Object.values(this.data.findingOwnerships);
+    if (auditId) {
+      const existing = allOwnerships.find(
+        (fo) => fo.finding_id === findingId && fo.audit_id === auditId
+      );
+      if (existing) {
+        return existing;
+      }
+    } else {
+      const existing = allOwnerships.find((fo) => fo.finding_id === findingId);
+      if (existing) {
+        return existing;
+      }
     }
 
+    const id = auditId ? `${ownerId}:${auditId}:${findingId}` : `${ownerId}:${findingId}`;
     const record: FindingOwnership = {
+      id,
       finding_id: findingId,
       owner_id: ownerId,
       audit_id: auditId,
       created_at: new Date().toISOString(),
     };
-    this.data.findingOwnerships[findingId] = record;
+    this.data.findingOwnerships[id] = record;
+    if (!this.data.findingOwnerships[findingId]) {
+      this.data.findingOwnerships[findingId] = record;
+    }
     this.flushToDisk();
     return record;
   }
@@ -291,11 +320,53 @@ export class ServerStorage implements IStorage {
     auditId?: string,
     ownerId?: string
   ): Promise<string | null> {
-    const record = this.data.findingOwnerships[findingId];
-    if (!record) return null;
-    if (ownerId && record.owner_id !== ownerId) return null;
-    if (auditId && record.audit_id && record.audit_id !== auditId) return null;
-    return record.owner_id;
+    if (!auditId && this.data.findingOwnerships[findingId]) {
+      return this.data.findingOwnerships[findingId].owner_id;
+    }
+
+    const allOwnerships = Array.from(
+      new Map(
+        Object.values(this.data.findingOwnerships).map((fo) => [
+          fo.id || `${fo.owner_id}:${fo.audit_id || 'null'}:${fo.finding_id}`,
+          fo,
+        ])
+      ).values()
+    );
+
+    if (auditId) {
+      const matching = allOwnerships.find(
+        (fo) => fo.finding_id === findingId && fo.audit_id === auditId
+      );
+      if (matching) {
+        return matching.owner_id;
+      }
+
+      // Check for legacy record with no audit_id
+      const legacy = allOwnerships.filter(
+        (fo) => fo.finding_id === findingId && !fo.audit_id
+      );
+      if (legacy.length === 1) {
+        return legacy[0].owner_id;
+      }
+      return null;
+    }
+
+    // No auditId provided: inspect all records for this findingId
+    const matching = allOwnerships.filter((fo) => fo.finding_id === findingId);
+    // Deduplicate by owner_id and audit_id to avoid counting alias keys
+    const uniqueRecords = Array.from(
+      new Map(
+        matching.map((fo) => [`${fo.owner_id}:${fo.audit_id || 'null'}:${fo.finding_id}`, fo])
+      ).values()
+    );
+
+    if (uniqueRecords.length === 0) return null;
+    if (uniqueRecords.length > 1) {
+      // Multiple audits or owners: fail closed
+      return null;
+    }
+
+    return uniqueRecords[0].owner_id;
   }
 
   async listUserFindings(ownerId: string): Promise<string[]> {
@@ -309,13 +380,17 @@ export class ServerStorage implements IStorage {
   }
 
   // --- Entitlement Operations ---
-  private entitlementKey(userId: string, findingId: string): string {
-    return `${userId}:${findingId}`;
+  private entitlementKey(userId: string, findingId: string, auditId?: string): string {
+    return auditId ? `${userId}:${auditId}:${findingId}` : `${userId}:${findingId}`;
   }
 
   async createEntitlement(entitlement: Entitlement): Promise<Entitlement> {
-    const key = this.entitlementKey(entitlement.user_id, entitlement.finding_id);
-    const existing = this.data.entitlements[key];
+    const key = this.entitlementKey(entitlement.user_id, entitlement.finding_id, entitlement.audit_id);
+    const existing = await this.getEntitlement(
+      entitlement.user_id,
+      entitlement.finding_id,
+      entitlement.audit_id
+    );
     if (
       existing &&
       existing.status === 'REVOKED' &&
@@ -324,24 +399,66 @@ export class ServerStorage implements IStorage {
       return existing; // Monotonic invariant
     }
     this.data.entitlements[key] = entitlement;
+    if (!entitlement.audit_id) {
+      this.data.entitlements[this.entitlementKey(entitlement.user_id, entitlement.finding_id)] = entitlement;
+    }
     this.flushToDisk();
     return entitlement;
   }
 
   async updateEntitlement(entitlement: Entitlement): Promise<Entitlement> {
-    const key = this.entitlementKey(entitlement.user_id, entitlement.finding_id);
+    const key = this.entitlementKey(entitlement.user_id, entitlement.finding_id, entitlement.audit_id);
     this.data.entitlements[key] = entitlement;
+    if (!entitlement.audit_id) {
+      this.data.entitlements[this.entitlementKey(entitlement.user_id, entitlement.finding_id)] = entitlement;
+    }
     this.flushToDisk();
     return entitlement;
   }
 
-  async getEntitlement(userId: string, findingId: string): Promise<Entitlement | null> {
-    const key = this.entitlementKey(userId, findingId);
-    return this.data.entitlements[key] || null;
+  async getEntitlement(userId: string, findingId: string, auditId?: string): Promise<Entitlement | null> {
+    const allEntitlements = Array.from(
+      new Map(Object.values(this.data.entitlements).map((e) => [e.id, e])).values()
+    );
+
+    if (auditId) {
+      const key = this.entitlementKey(userId, findingId, auditId);
+      if (this.data.entitlements[key]) {
+        return this.data.entitlements[key];
+      }
+      const matching = allEntitlements.find(
+        (e) => e.user_id === userId && e.finding_id === findingId && e.audit_id === auditId
+      );
+      if (matching) return matching;
+
+      // Legacy entitlement with NULL audit_id
+      const legacy = allEntitlements.filter(
+        (e) => e.user_id === userId && e.finding_id === findingId && !e.audit_id
+      );
+      if (legacy.length === 1) {
+        return legacy[0];
+      }
+      return null;
+    }
+
+    // No auditId provided
+    const matching = allEntitlements.filter(
+      (e) => e.user_id === userId && e.finding_id === findingId
+    );
+    const uniqueEntitlements = Array.from(
+      new Map(matching.map((e) => [e.id, e])).values()
+    );
+
+    if (uniqueEntitlements.length === 0) return null;
+    if (uniqueEntitlements.length > 1) {
+      // Ambiguous entitlement across multiple audits: fail closed
+      return null;
+    }
+    return uniqueEntitlements[0];
   }
 
-  async hasActivePaidEntitlement(userId: string, findingId: string): Promise<boolean> {
-    const entitlement = await this.getEntitlement(userId, findingId);
+  async hasActivePaidEntitlement(userId: string, findingId: string, auditId?: string): Promise<boolean> {
+    const entitlement = await this.getEntitlement(userId, findingId, auditId);
     return Boolean(
       entitlement &&
       entitlement.type === 'PAID_FIX_PACKAGE' &&
@@ -521,13 +638,23 @@ export class ServerStorage implements IStorage {
     userId: string;
     findingId: string;
     orderId: string;
+    auditId?: string;
   }): Promise<{ status: 'SUCCESS' | 'DUPLICATE' | 'NOT_FOUND' | 'MISMATCH'; entitlement?: Entitlement }> {
     if (this.data.processedWebhooks[params.event.event_id]) {
       this.inFlightWebhooks.delete(params.event.event_id);
       return { status: 'DUPLICATE' };
     }
-    const key = this.entitlementKey(params.userId, params.findingId);
-    const existing = this.data.entitlements[key];
+    const key = this.entitlementKey(params.userId, params.findingId, params.auditId);
+    let existing: Entitlement | undefined = this.data.entitlements[key];
+    if (!existing) {
+      existing = Object.values(this.data.entitlements).find(
+        (e) =>
+          e.user_id === params.userId &&
+          e.finding_id === params.findingId &&
+          (params.auditId ? e.audit_id === params.auditId : true) &&
+          e.provider_transaction_id === params.orderId
+      );
+    }
     if (!existing) {
       this.inFlightWebhooks.delete(params.event.event_id);
       return { status: 'NOT_FOUND' };

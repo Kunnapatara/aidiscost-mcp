@@ -25,6 +25,7 @@ export type EntitlementStatus = 'ACTIVE' | 'REVOKED';
 export interface Entitlement {
   id: string;
   user_id: string;
+  audit_id?: string;
   finding_id: string;
   type: EntitlementType;
   status: EntitlementStatus;

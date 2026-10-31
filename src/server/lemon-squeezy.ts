@@ -62,6 +62,7 @@ export interface CreateCheckoutParams {
   userId: string;
   userEmail: string;
   findingId: string;
+  auditId?: string;
   redirectUrl?: string;
 }
 
@@ -92,6 +93,7 @@ export async function createLemonSqueezyCheckout(
           custom: {
             user_id: params.userId,
             finding_id: params.findingId,
+            audit_id: params.auditId || undefined,
             product: 'FIX_PACKAGE',
           },
         },
@@ -144,6 +146,7 @@ export interface CreateOutcomeFeeCheckoutParams {
   userId: string;
   userEmail: string;
   findingId: string;
+  auditId?: string;
   obligationId: string;
   verificationId: string;
   feeAmountUsd: number;
@@ -191,6 +194,7 @@ export async function createLemonSqueezyOutcomeFeeCheckout(
           custom: {
             user_id: params.userId,
             finding_id: params.findingId,
+            audit_id: params.auditId || undefined,
             obligation_id: params.obligationId,
             verification_id: params.verificationId,
             fee_amount_usd: params.feeAmountUsd,

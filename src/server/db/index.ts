@@ -82,18 +82,23 @@ export async function initializeDatabaseSchema(client: Client): Promise<void> {
       );`,
       `CREATE INDEX IF NOT EXISTS idx_audits_user_id ON audits (user_id);`,
       `CREATE TABLE IF NOT EXISTS finding_ownerships (
-        finding_id text PRIMARY KEY NOT NULL,
+        id text PRIMARY KEY NOT NULL,
+        finding_id text NOT NULL,
         audit_id text,
         owner_id text NOT NULL,
         created_at text NOT NULL,
         FOREIGN KEY (owner_id) REFERENCES users(id) ON UPDATE no action ON DELETE cascade,
         FOREIGN KEY (audit_id) REFERENCES audits(id) ON UPDATE no action ON DELETE cascade
       );`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_ownerships_owner_audit_finding ON finding_ownerships (owner_id, audit_id, finding_id);`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_ownerships_owner_finding_null_audit ON finding_ownerships (owner_id, finding_id) WHERE audit_id IS NULL;`,
+      `CREATE INDEX IF NOT EXISTS idx_finding_ownerships_finding_id ON finding_ownerships (finding_id);`,
       `CREATE INDEX IF NOT EXISTS idx_finding_ownerships_owner_id ON finding_ownerships (owner_id);`,
       `CREATE INDEX IF NOT EXISTS idx_finding_ownerships_audit_id ON finding_ownerships (audit_id);`,
       `CREATE TABLE IF NOT EXISTS entitlements (
         id text PRIMARY KEY NOT NULL,
         user_id text NOT NULL,
+        audit_id text,
         finding_id text NOT NULL,
         type text NOT NULL,
         status text NOT NULL,
@@ -102,10 +107,14 @@ export async function initializeDatabaseSchema(client: Client): Promise<void> {
         amount_usd real NOT NULL,
         created_at text NOT NULL,
         updated_at text NOT NULL,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE cascade
+        FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE cascade,
+        FOREIGN KEY (audit_id) REFERENCES audits(id) ON UPDATE no action ON DELETE cascade
       );`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_entitlements_user_finding ON entitlements (user_id, finding_id);`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_entitlements_user_audit_finding ON entitlements (user_id, audit_id, finding_id);`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_entitlements_user_finding_null_audit ON entitlements (user_id, finding_id) WHERE audit_id IS NULL;`,
       `CREATE INDEX IF NOT EXISTS idx_entitlements_user_id ON entitlements (user_id);`,
+      `CREATE INDEX IF NOT EXISTS idx_entitlements_finding_id ON entitlements (finding_id);`,
+      `CREATE INDEX IF NOT EXISTS idx_entitlements_audit_id ON entitlements (audit_id);`,
       `CREATE TABLE IF NOT EXISTS webhook_events (
         event_id text PRIMARY KEY NOT NULL,
         provider text NOT NULL,

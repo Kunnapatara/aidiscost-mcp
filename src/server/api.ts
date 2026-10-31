@@ -341,15 +341,16 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
+      const auditId = (req.query?.audit_id as string) || undefined;
 
       // Privacy boundary: if finding does not belong to user, return 404 to avoid leaking existence
-      const ownerId = await storage.getFindingOwner(findingId);
+      const ownerId = await storage.getFindingOwner(findingId, auditId);
       if (ownerId && ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
 
-      const verification = await storage.getVerificationByFindingId(findingId);
+      const verification = await storage.getVerificationByFindingId(findingId, user.id, auditId);
       if (!verification) {
         res.json({
           finding_id: findingId,
@@ -387,9 +388,10 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
+      const auditId = (req.query?.audit_id as string) || (req.body?.audit_id as string) || undefined;
 
       // Enforce finding ownership
-      const ownerId = await storage.getFindingOwner(findingId);
+      const ownerId = await storage.getFindingOwner(findingId, auditId);
       if (ownerId && ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
@@ -397,7 +399,7 @@ export function createApiRouter(): Router {
 
       // Auto-register finding ownership if not registered yet
       if (!ownerId) {
-        await storage.registerFindingOwnership(findingId, user.id);
+        await storage.registerFindingOwnership(findingId, user.id, auditId);
       }
 
       const { baseline, is_sample_data, deployment_timestamp } = req.body || {};
@@ -406,11 +408,12 @@ export function createApiRouter(): Router {
         ? deployment_timestamp
         : now;
 
-      const existing = await storage.getVerificationByFindingId(findingId);
+      const existing = await storage.getVerificationByFindingId(findingId, user.id, auditId);
 
       const updatedRecord: AuthoritativeVerification = {
         id: existing?.id || `ver_${crypto.randomUUID()}`,
         finding_id: findingId,
+        audit_id: auditId || existing?.audit_id,
         user_id: user.id,
         stage: 'CUSTOMER_DEPLOYED',
         is_authoritative: false,
@@ -456,18 +459,19 @@ export function createApiRouter(): Router {
       const user = req.user!;
       const storage = getStorage();
 
+      const { events, finding, file_name } = req.body || {};
+      const auditId = (req.query?.audit_id as string) || (req.body?.audit_id as string) || (finding?.audit_id as string) || undefined;
+
       // Enforce finding ownership
-      const ownerId = await storage.getFindingOwner(findingId);
+      const ownerId = await storage.getFindingOwner(findingId, auditId);
       if (ownerId && ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
 
       if (!ownerId) {
-        await storage.registerFindingOwnership(findingId, user.id);
+        await storage.registerFindingOwnership(findingId, user.id, auditId);
       }
-
-      const { events, finding, file_name } = req.body || {};
 
       if (!Array.isArray(events)) {
         res.status(400).json({ error: 'INVALID_EVENTS', message: 'events array is required.' });
@@ -479,7 +483,7 @@ export function createApiRouter(): Router {
         return;
       }
 
-      const existing = await storage.getVerificationByFindingId(findingId);
+      const existing = await storage.getVerificationByFindingId(findingId, user.id, auditId);
       const now = new Date().toISOString();
       const deployTime = existing?.deployment_timestamp || req.body.deployment_timestamp || now;
       const obsStart = existing?.observation_start || deployTime;
@@ -532,6 +536,7 @@ export function createApiRouter(): Router {
       const authRecord: AuthoritativeVerification = {
         id: existing?.id || `ver_${crypto.randomUUID()}`,
         finding_id: findingId,
+        audit_id: auditId || existing?.audit_id,
         user_id: user.id,
         stage: evaluated.stage,
         is_authoritative: isAuth,
@@ -583,7 +588,7 @@ export function createApiRouter(): Router {
   // POST /api/billing/fix-package/checkout
   router.post('/billing/fix-package/checkout', requireAuth, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const { finding_id, redirect_url } = req.body || {};
+      const { finding_id, redirect_url, audit_id } = req.body || {};
       if (!finding_id || typeof finding_id !== 'string') {
         res.status(400).json({ error: 'INVALID_FINDING', message: 'finding_id is required.' });
         return;
@@ -593,7 +598,7 @@ export function createApiRouter(): Router {
       const storage = getStorage();
 
       // Check ownership
-      const ownerId = await storage.getFindingOwner(finding_id);
+      const ownerId = await storage.getFindingOwner(finding_id, audit_id);
       if (ownerId && ownerId !== user.id) {
         // Do not leak existence of another user's finding
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
@@ -602,11 +607,11 @@ export function createApiRouter(): Router {
 
       // Automatically register ownership if not registered yet
       if (!ownerId) {
-        await storage.registerFindingOwnership(finding_id, user.id);
+        await storage.registerFindingOwnership(finding_id, user.id, audit_id);
       }
 
       // Check if already entitled
-      const alreadyPaid = await storage.hasActivePaidEntitlement(user.id, finding_id);
+      const alreadyPaid = await storage.hasActivePaidEntitlement(user.id, finding_id, audit_id);
       if (alreadyPaid) {
         res.status(409).json({
           error: 'ALREADY_ENTITLED',
@@ -630,6 +635,7 @@ export function createApiRouter(): Router {
         userId: user.id,
         userEmail: user.email,
         findingId: finding_id,
+        auditId: audit_id,
         redirectUrl: redirect_url,
       });
 
@@ -664,23 +670,27 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
+      const auditId = (req.query?.audit_id as string) || (req.body?.audit_id as string) || undefined;
 
       // 1. Verify finding ownership
-      const ownerId = await storage.getFindingOwner(findingId);
+      const ownerId = await storage.getFindingOwner(findingId, auditId);
       if (ownerId && ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
 
-      // Enforce cross-user barrier on existing verification
-      const verification = await storage.getVerificationByFindingId(findingId);
-      if (verification && verification.user_id !== user.id) {
+      // Enforce cross-user barrier on existing verification:
+      // If ANY verification exists for this finding belonging to another user, fail closed with 404
+      const anyVerification = await storage.getVerificationByFindingId(findingId, undefined, auditId);
+      if (anyVerification && anyVerification.user_id !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
 
+      const verification = anyVerification;
+
       // Check if an obligation already exists for this finding (Idempotent replay)
-      const existing = await storage.getOutcomeFeeObligation(findingId);
+      const existing = await storage.getOutcomeFeeObligation(findingId, user.id, auditId);
       if (existing) {
         if (existing.user_id !== user.id || existing.finding_id !== findingId) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
@@ -694,7 +704,7 @@ export function createApiRouter(): Router {
       }
 
       if (!ownerId) {
-        await storage.registerFindingOwnership(findingId, user.id);
+        await storage.registerFindingOwnership(findingId, user.id, auditId);
       }
 
       // 2. Load authoritative verification
@@ -753,7 +763,7 @@ export function createApiRouter(): Router {
       }
 
       // 6. Obligation creation & database uniqueness guarantee
-      const existingAfterCalc = await storage.getOutcomeFeeObligation(findingId);
+      const existingAfterCalc = await storage.getOutcomeFeeObligation(findingId, user.id, auditId || verification.audit_id);
       if (existingAfterCalc) {
         res.status(200).json({
           success: true,
@@ -767,6 +777,7 @@ export function createApiRouter(): Router {
       const obligation: OutcomeFeeObligation = {
         id: `of_${crypto.randomUUID()}`,
         user_id: user.id,
+        audit_id: auditId || verification.audit_id,
         finding_id: findingId,
         verification_id: verification.id,
         verified_annualized_savings_usd: verification.verified_annualized_savings_usd,
@@ -798,14 +809,15 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
+      const auditId = (req.query?.audit_id as string) || undefined;
 
-      const ownerId = await storage.getFindingOwner(findingId);
+      const ownerId = await storage.getFindingOwner(findingId, auditId);
       if (ownerId && ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
 
-      const obligation = await storage.getOutcomeFeeObligation(findingId);
+      const obligation = await storage.getOutcomeFeeObligation(findingId, user.id, auditId);
       if (obligation && (obligation.user_id !== user.id || obligation.finding_id !== findingId)) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
@@ -826,14 +838,15 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
+      const auditId = (req.query?.audit_id as string) || (req.body?.audit_id as string) || undefined;
 
-      const ownerId = await storage.getFindingOwner(findingId);
+      const ownerId = await storage.getFindingOwner(findingId, auditId);
       if (ownerId && ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
 
-      const obligation = await storage.getOutcomeFeeObligation(findingId);
+      const obligation = await storage.getOutcomeFeeObligation(findingId, user.id, auditId);
       if (!obligation) {
         res.status(404).json({
           error: 'OBLIGATION_NOT_FOUND',
@@ -876,6 +889,7 @@ export function createApiRouter(): Router {
         userId: user.id,
         userEmail: user.email,
         findingId,
+        auditId: auditId || obligation.audit_id,
         obligationId: obligation.id,
         verificationId: obligation.verification_id,
         feeAmountUsd: obligation.fee_amount_usd,
@@ -1101,12 +1115,14 @@ export function createApiRouter(): Router {
               processed_at: now,
             };
 
+            const refundAuditId = customData?.audit_id ? String(customData.audit_id).trim() : undefined;
             if (typeof storage.processOrderRefundedWebhookTransaction === 'function') {
               const txRes = await storage.processOrderRefundedWebhookTransaction({
                 event: eventData,
                 userId,
                 findingId,
                 orderId,
+                auditId: refundAuditId,
               });
 
               if (txRes.status === 'DUPLICATE') {
@@ -1143,7 +1159,7 @@ export function createApiRouter(): Router {
               });
               return;
             } else {
-              const existing = await storage.getEntitlement(userId, findingId);
+              const existing = await storage.getEntitlement(userId, findingId, refundAuditId);
               if (!existing) {
                 storage.releaseWebhookClaim(eventId);
                 res.status(404).json({
@@ -1218,7 +1234,8 @@ export function createApiRouter(): Router {
             return;
           }
 
-          const ownerId = await storage.getFindingOwner(findingId);
+          const auditId = customData?.audit_id ? String(customData.audit_id).trim() : undefined;
+          const ownerId = await storage.getFindingOwner(findingId, auditId, userId);
           if (!ownerId || ownerId !== userId) {
             storage.releaseWebhookClaim(eventId);
             res.status(403).json({
@@ -1232,6 +1249,7 @@ export function createApiRouter(): Router {
           const entitlement: Entitlement = {
             id: `ent_${crypto.randomUUID()}`,
             user_id: userId,
+            audit_id: auditId,
             finding_id: findingId,
             type: 'PAID_FIX_PACKAGE',
             status: 'ACTIVE',
@@ -1338,8 +1356,9 @@ export function createApiRouter(): Router {
             return;
           }
 
+          const auditId = customData?.audit_id ? String(customData.audit_id).trim() : undefined;
           // Verify finding ownership
-          const ownerId = await storage.getFindingOwner(findingId);
+          const ownerId = await storage.getFindingOwner(findingId, auditId, userId);
           if (!ownerId || ownerId !== userId) {
             storage.releaseWebhookClaim(eventId);
             res.status(403).json({
@@ -1353,10 +1372,10 @@ export function createApiRouter(): Router {
           const obligationId = customData?.obligation_id;
           let obligation: OutcomeFeeObligation | null = null;
           if (obligationId) {
-            obligation = await storage.getOutcomeFeeObligationById(obligationId);
+            obligation = await storage.getOutcomeFeeObligationById(obligationId, userId);
           }
           if (!obligation) {
-            obligation = await storage.getOutcomeFeeObligation(findingId);
+            obligation = await storage.getOutcomeFeeObligation(findingId, userId, auditId);
           }
 
           if (!obligation) {
