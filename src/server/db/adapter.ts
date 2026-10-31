@@ -422,6 +422,19 @@ export class DrizzleStorageAdapter implements IStorage {
         .limit(2);
 
       if (legacyRows.length === 1) {
+        const userAudits = await this.db
+          .select({ auditId: schema.findings.auditId })
+          .from(schema.findings)
+          .where(
+            and(
+              eq(schema.findings.userId, userId),
+              eq(schema.findings.findingId, findingId)
+            )
+          );
+        if (userAudits.length > 1) {
+          return null;
+        }
+
         return {
           id: legacyRows[0].id,
           user_id: legacyRows[0].userId,
@@ -454,6 +467,21 @@ export class DrizzleStorageAdapter implements IStorage {
     if (rows.length > 1) {
       // Ambiguous entitlement across multiple audits: fail closed
       return null;
+    }
+
+    if (!rows[0].auditId) {
+      const userAudits = await this.db
+        .select({ auditId: schema.findings.auditId })
+        .from(schema.findings)
+        .where(
+          and(
+            eq(schema.findings.userId, userId),
+            eq(schema.findings.findingId, findingId)
+          )
+        );
+      if (userAudits.length > 1) {
+        return null;
+      }
     }
 
     return {
@@ -1169,30 +1197,52 @@ export class DrizzleStorageAdapter implements IStorage {
           .where(eq(schema.outcomeFeeObligations.id, params.obligation.id));
 
         if (params.entitlement) {
-          await tx
-            .insert(schema.entitlements)
-            .values({
-              id: params.entitlement.id,
-              userId: params.entitlement.user_id,
-              findingId: params.entitlement.finding_id,
-              type: params.entitlement.type,
-              status: params.entitlement.status,
-              provider: params.entitlement.provider,
-              providerTransactionId: params.entitlement.provider_transaction_id,
-              amountUsd: params.entitlement.amount_usd,
-              createdAt: params.entitlement.created_at,
-              updatedAt: params.entitlement.updated_at,
-            })
-            .onConflictDoUpdate({
-              target: [schema.entitlements.userId, schema.entitlements.findingId],
-              set: {
+          const entitlementQuery = params.entitlement.audit_id
+            ? and(
+                eq(schema.entitlements.userId, params.entitlement.user_id),
+                eq(schema.entitlements.findingId, params.entitlement.finding_id),
+                eq(schema.entitlements.auditId, params.entitlement.audit_id)
+              )
+            : and(
+                eq(schema.entitlements.userId, params.entitlement.user_id),
+                eq(schema.entitlements.findingId, params.entitlement.finding_id)
+              );
+
+          const existingEntitlementRows = await tx
+            .select()
+            .from(schema.entitlements)
+            .where(entitlementQuery)
+            .limit(1);
+
+          if (existingEntitlementRows[0]) {
+            await tx
+              .update(schema.entitlements)
+              .set({
                 status: params.entitlement.status,
                 provider: params.entitlement.provider,
                 providerTransactionId: params.entitlement.provider_transaction_id,
                 amountUsd: params.entitlement.amount_usd,
                 updatedAt: params.entitlement.updated_at,
-              },
-            });
+              })
+              .where(eq(schema.entitlements.id, existingEntitlementRows[0].id));
+          } else {
+            await tx
+              .insert(schema.entitlements)
+              .values({
+                id: params.entitlement.id,
+                userId: params.entitlement.user_id,
+                auditId: params.entitlement.audit_id || null,
+                findingId: params.entitlement.finding_id,
+                type: params.entitlement.type,
+                status: params.entitlement.status,
+                provider: params.entitlement.provider,
+                providerTransactionId: params.entitlement.provider_transaction_id,
+                amountUsd: params.entitlement.amount_usd,
+                createdAt: params.entitlement.created_at,
+                updatedAt: params.entitlement.updated_at,
+              })
+              .onConflictDoNothing();
+          }
         }
 
         this.processedWebhooksCache.add(params.event.event_id);

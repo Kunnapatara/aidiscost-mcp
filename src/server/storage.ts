@@ -436,6 +436,12 @@ export class ServerStorage implements IStorage {
         (e) => e.user_id === userId && e.finding_id === findingId && !e.audit_id
       );
       if (legacy.length === 1) {
+        const userAudits = Object.values(this.data.findings).filter(
+          (f) => f.user_id === userId && f.finding_id === findingId
+        );
+        if (userAudits.length > 1) {
+          return null;
+        }
         return legacy[0];
       }
       return null;
@@ -454,6 +460,16 @@ export class ServerStorage implements IStorage {
       // Ambiguous entitlement across multiple audits: fail closed
       return null;
     }
+
+    if (!uniqueEntitlements[0].audit_id) {
+      const userAudits = Object.values(this.data.findings).filter(
+        (f) => f.user_id === userId && f.finding_id === findingId
+      );
+      if (userAudits.length > 1) {
+        return null;
+      }
+    }
+
     return uniqueEntitlements[0];
   }
 
@@ -613,8 +629,12 @@ export class ServerStorage implements IStorage {
       this.inFlightWebhooks.delete(params.event.event_id);
       return { status: 'DUPLICATE' };
     }
-    const key = this.entitlementKey(params.entitlement.user_id, params.entitlement.finding_id);
-    const existing = this.data.entitlements[key];
+    const key = this.entitlementKey(params.entitlement.user_id, params.entitlement.finding_id, params.entitlement.audit_id);
+    const existing = await this.getEntitlement(
+      params.entitlement.user_id,
+      params.entitlement.finding_id,
+      params.entitlement.audit_id
+    );
     if (
       existing &&
       existing.status === 'REVOKED' &&
@@ -627,6 +647,9 @@ export class ServerStorage implements IStorage {
       return { status: 'SUCCESS' };
     }
     this.data.entitlements[key] = params.entitlement;
+    if (!params.entitlement.audit_id) {
+      this.data.entitlements[this.entitlementKey(params.entitlement.user_id, params.entitlement.finding_id)] = params.entitlement;
+    }
     this.data.processedWebhooks[params.event.event_id] = params.event;
     this.inFlightWebhooks.delete(params.event.event_id);
     this.flushToDisk();
@@ -695,11 +718,18 @@ export class ServerStorage implements IStorage {
       this.inFlightWebhooks.delete(params.event.event_id);
       return { status: 'DUPLICATE' };
     }
-    this.data.outcomeFeeObligations[params.obligation.finding_id] = params.obligation;
-    this.data.outcomeFeeObligationsById[params.obligation.id] = params.obligation.finding_id;
+    const key = this.outcomeFeeCompositeKey(params.obligation.user_id, params.obligation.finding_id, params.obligation.audit_id);
+    this.data.outcomeFeeObligations[key] = params.obligation;
+    this.data.outcomeFeeObligationsById[params.obligation.id] = key;
+    if (!params.obligation.audit_id) {
+      this.data.outcomeFeeObligations[params.obligation.finding_id] = params.obligation;
+    }
     if (params.entitlement) {
-      const key = this.entitlementKey(params.entitlement.user_id, params.entitlement.finding_id);
-      this.data.entitlements[key] = params.entitlement;
+      const entKey = this.entitlementKey(params.entitlement.user_id, params.entitlement.finding_id, params.entitlement.audit_id);
+      this.data.entitlements[entKey] = params.entitlement;
+      if (!params.entitlement.audit_id) {
+        this.data.entitlements[this.entitlementKey(params.entitlement.user_id, params.entitlement.finding_id)] = params.entitlement;
+      }
     }
     this.data.processedWebhooks[params.event.event_id] = params.event;
     this.inFlightWebhooks.delete(params.event.event_id);

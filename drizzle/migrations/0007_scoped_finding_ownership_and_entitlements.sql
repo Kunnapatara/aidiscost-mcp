@@ -1,5 +1,7 @@
 PRAGMA foreign_keys = OFF;
 --> statement-breakpoint
+DROP TABLE IF EXISTS `finding_ownerships_new`;
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS `finding_ownerships_new` (
 	`id` text PRIMARY KEY NOT NULL,
 	`finding_id` text NOT NULL,
@@ -36,6 +38,8 @@ CREATE INDEX IF NOT EXISTS `idx_finding_ownerships_owner_id` ON `finding_ownersh
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS `idx_finding_ownerships_audit_id` ON `finding_ownerships` (`audit_id`);
 --> statement-breakpoint
+DROP TABLE IF EXISTS `verifications_new`;
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS `verifications_new` (
 	`id` text PRIMARY KEY NOT NULL,
 	`audit_id` text,
@@ -66,7 +70,60 @@ CREATE TABLE IF NOT EXISTS `verifications_new` (
 	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
-INSERT OR IGNORE INTO `verifications_new` SELECT * FROM `verifications`;
+INSERT INTO `verifications_new` (
+	`id`,
+	`audit_id`,
+	`finding_id`,
+	`user_id`,
+	`stage`,
+	`is_authoritative`,
+	`is_simulated`,
+	`baseline_start`,
+	`baseline_end`,
+	`baseline_sample_count`,
+	`baseline_avg_cost_usd`,
+	`deployment_timestamp`,
+	`observation_start`,
+	`observation_end`,
+	`observation_sample_count`,
+	`post_avg_cost_usd`,
+	`observed_reduction_pct`,
+	`verified_annualized_savings_usd`,
+	`original_estimated_annualized_usd`,
+	`verification_confidence`,
+	`verification_notes`,
+	`post_deployment_file_name`,
+	`verified_at`,
+	`created_at`,
+	`updated_at`
+)
+SELECT
+	`id`,
+	`audit_id`,
+	`finding_id`,
+	`user_id`,
+	`stage`,
+	`is_authoritative`,
+	`is_simulated`,
+	`baseline_start`,
+	`baseline_end`,
+	`baseline_sample_count`,
+	`baseline_avg_cost_usd`,
+	`deployment_timestamp`,
+	`observation_start`,
+	`observation_end`,
+	`observation_sample_count`,
+	`post_avg_cost_usd`,
+	`observed_reduction_pct`,
+	`verified_annualized_savings_usd`,
+	`original_estimated_annualized_usd`,
+	`verification_confidence`,
+	`verification_notes`,
+	`post_deployment_file_name`,
+	`verified_at`,
+	`created_at`,
+	`updated_at`
+FROM `verifications`;
 --> statement-breakpoint
 DROP TABLE `verifications`;
 --> statement-breakpoint
@@ -79,6 +136,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS `idx_verifications_user_audit_finding` ON `ver
 CREATE UNIQUE INDEX IF NOT EXISTS `idx_verifications_user_finding_null_audit` ON `verifications` (`user_id`, `finding_id`) WHERE `audit_id` IS NULL;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS `idx_verifications_user_id` ON `verifications` (`user_id`);
+--> statement-breakpoint
+DROP TABLE IF EXISTS `outcome_fee_obligations_new`;
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS `outcome_fee_obligations_new` (
 	`id` text PRIMARY KEY NOT NULL,
@@ -102,7 +161,42 @@ CREATE TABLE IF NOT EXISTS `outcome_fee_obligations_new` (
 	FOREIGN KEY (`verification_id`) REFERENCES `verifications`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
-INSERT OR IGNORE INTO `outcome_fee_obligations_new` SELECT * FROM `outcome_fee_obligations`;
+INSERT INTO `outcome_fee_obligations_new` (
+	`id`,
+	`user_id`,
+	`audit_id`,
+	`finding_id`,
+	`verification_id`,
+	`verified_annualized_savings_usd`,
+	`fee_amount_usd`,
+	`currency`,
+	`status`,
+	`provider`,
+	`checkout_url`,
+	`provider_order_id`,
+	`provider_transaction_id`,
+	`paid_at`,
+	`created_at`,
+	`updated_at`
+)
+SELECT
+	`id`,
+	`user_id`,
+	`audit_id`,
+	`finding_id`,
+	`verification_id`,
+	`verified_annualized_savings_usd`,
+	`fee_amount_usd`,
+	`currency`,
+	`status`,
+	`provider`,
+	`checkout_url`,
+	`provider_order_id`,
+	`provider_transaction_id`,
+	`paid_at`,
+	`created_at`,
+	`updated_at`
+FROM `outcome_fee_obligations`;
 --> statement-breakpoint
 DROP TABLE `outcome_fee_obligations`;
 --> statement-breakpoint
@@ -145,5 +239,64 @@ WHERE `audit_id` IS NULL
     WHERE f.finding_id = `entitlements`.`finding_id`
       AND a.user_id = `entitlements`.`user_id`
   ) = 1;
+--> statement-breakpoint
+UPDATE `verifications`
+SET `audit_id` = (
+  SELECT f.audit_id
+  FROM `findings` f
+  JOIN `audits` a ON a.id = f.audit_id
+  WHERE f.finding_id = `verifications`.`finding_id`
+    AND a.user_id = `verifications`.`user_id`
+  LIMIT 1
+)
+WHERE `audit_id` IS NULL
+  AND (
+    SELECT COUNT(DISTINCT f.audit_id)
+    FROM `findings` f
+    JOIN `audits` a ON a.id = f.audit_id
+    WHERE f.finding_id = `verifications`.`finding_id`
+      AND a.user_id = `verifications`.`user_id`
+  ) = 1;
+--> statement-breakpoint
+UPDATE `outcome_fee_obligations`
+SET `audit_id` = (
+  SELECT f.audit_id
+  FROM `findings` f
+  JOIN `audits` a ON a.id = f.audit_id
+  WHERE f.finding_id = `outcome_fee_obligations`.`finding_id`
+    AND a.user_id = `outcome_fee_obligations`.`user_id`
+  LIMIT 1
+)
+WHERE `audit_id` IS NULL
+  AND (
+    SELECT COUNT(DISTINCT f.audit_id)
+    FROM `findings` f
+    JOIN `audits` a ON a.id = f.audit_id
+    WHERE f.finding_id = `outcome_fee_obligations`.`finding_id`
+      AND a.user_id = `outcome_fee_obligations`.`user_id`
+  ) = 1;
+--> statement-breakpoint
+UPDATE `finding_ownerships`
+SET `audit_id` = (
+  SELECT f.audit_id
+  FROM `findings` f
+  JOIN `audits` a ON a.id = f.audit_id
+  WHERE f.finding_id = `finding_ownerships`.`finding_id`
+    AND a.user_id = `finding_ownerships`.`owner_id`
+  LIMIT 1
+)
+WHERE `audit_id` IS NULL
+  AND (
+    SELECT COUNT(DISTINCT f.audit_id)
+    FROM `findings` f
+    JOIN `audits` a ON a.id = f.audit_id
+    WHERE f.finding_id = `finding_ownerships`.`finding_id`
+      AND a.user_id = `finding_ownerships`.`owner_id`
+  ) = 1;
+--> statement-breakpoint
+UPDATE `finding_ownerships`
+SET `id` = `owner_id` || ':' || `audit_id` || ':' || `finding_id`
+WHERE `audit_id` IS NOT NULL
+  AND `id` NOT LIKE '%:%:%';
 --> statement-breakpoint
 PRAGMA foreign_keys = ON;

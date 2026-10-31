@@ -25,12 +25,19 @@ export async function runDatabaseMigrations(): Promise<void> {
   console.log(`[DB Migrate] Applying versioned Drizzle migrations from ${migrationsFolder}...`);
 
   try {
+    await client.execute('PRAGMA foreign_keys = OFF;');
     await migrate(db, { migrationsFolder });
+    await client.execute('PRAGMA foreign_keys = ON;');
     console.log('[DB Migrate] All pending migrations applied successfully.');
   } catch (err: any) {
     console.error('[DB Migrate] Migration failed:', err.message);
     throw err;
   } finally {
+    try {
+      await client.execute('PRAGMA foreign_keys = ON;');
+    } catch {
+      // Ignore cleanup error if connection closed
+    }
     client.close();
   }
 }

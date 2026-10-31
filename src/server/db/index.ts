@@ -214,14 +214,40 @@ export async function initializeDatabaseSchema(client: Client): Promise<void> {
     'write'
   );
 
-  // Upgrade finding_ownerships schema if it was created under the legacy schema without 'audit_id'
+  // Upgrade finding_ownerships schema if it was created under the legacy schema (missing 'id' PK or 'audit_id')
   try {
     const tableInfo = await client.execute("PRAGMA table_info('finding_ownerships')");
     const cols = (tableInfo.rows || []).map((r: any) => String(r.name || r[1]));
-    if (cols.length > 0 && !cols.includes('audit_id')) {
+    if (cols.length > 0 && (!cols.includes('id') || !cols.includes('audit_id'))) {
       await client.batch(
         [
-          `ALTER TABLE finding_ownerships ADD COLUMN audit_id text REFERENCES audits(id) ON UPDATE no action ON DELETE cascade;`,
+          `DROP TABLE IF EXISTS finding_ownerships_new;`,
+          `CREATE TABLE IF NOT EXISTS finding_ownerships_new (
+            id text PRIMARY KEY NOT NULL,
+            finding_id text NOT NULL,
+            audit_id text,
+            owner_id text NOT NULL,
+            created_at text NOT NULL,
+            FOREIGN KEY (owner_id) REFERENCES users(id) ON UPDATE no action ON DELETE cascade,
+            FOREIGN KEY (audit_id) REFERENCES audits(id) ON UPDATE no action ON DELETE cascade
+          );`,
+          `INSERT OR IGNORE INTO finding_ownerships_new (id, finding_id, audit_id, owner_id, created_at)
+           SELECT 
+             CASE 
+               WHEN ${cols.includes('audit_id') ? 'audit_id IS NOT NULL' : '0'} THEN owner_id || ':' || audit_id || ':' || finding_id
+               ELSE owner_id || ':' || finding_id
+             END AS id,
+             finding_id,
+             ${cols.includes('audit_id') ? 'audit_id' : 'NULL AS audit_id'},
+             owner_id,
+             created_at
+           FROM finding_ownerships;`,
+          `DROP TABLE finding_ownerships;`,
+          `ALTER TABLE finding_ownerships_new RENAME TO finding_ownerships;`,
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_ownerships_owner_audit_finding ON finding_ownerships (owner_id, audit_id, finding_id);`,
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_ownerships_owner_finding_null_audit ON finding_ownerships (owner_id, finding_id) WHERE audit_id IS NULL;`,
+          `CREATE INDEX IF NOT EXISTS idx_finding_ownerships_finding_id ON finding_ownerships (finding_id);`,
+          `CREATE INDEX IF NOT EXISTS idx_finding_ownerships_owner_id ON finding_ownerships (owner_id);`,
           `CREATE INDEX IF NOT EXISTS idx_finding_ownerships_audit_id ON finding_ownerships (audit_id);`,
         ],
         'write'
@@ -229,6 +255,73 @@ export async function initializeDatabaseSchema(client: Client): Promise<void> {
     }
   } catch (err) {
     // Non-fatal if table doesn't exist yet or already upgraded
+  }
+
+  // Upgrade entitlements schema if it was created under the legacy schema without 'audit_id'
+  try {
+    const tableInfo = await client.execute("PRAGMA table_info('entitlements')");
+    const cols = (tableInfo.rows || []).map((r: any) => String(r.name || r[1]));
+    if (cols.length > 0 && !cols.includes('audit_id')) {
+      await client.batch(
+        [
+          `ALTER TABLE entitlements ADD COLUMN audit_id text REFERENCES audits(id) ON UPDATE no action ON DELETE cascade;`,
+          `DROP INDEX IF EXISTS idx_entitlements_user_finding;`,
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_entitlements_user_audit_finding ON entitlements (user_id, audit_id, finding_id);`,
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_entitlements_user_finding_null_audit ON entitlements (user_id, finding_id) WHERE audit_id IS NULL;`,
+          `CREATE INDEX IF NOT EXISTS idx_entitlements_finding_id ON entitlements (finding_id);`,
+          `CREATE INDEX IF NOT EXISTS idx_entitlements_audit_id ON entitlements (audit_id);`,
+        ],
+        'write'
+      );
+    }
+  } catch (err) {
+    // Non-fatal if table doesn't exist yet or already upgraded
+  }
+
+  // Upgrade verifications schema if missing 'original_estimated_annualized_usd' or 'audit_id'
+  try {
+    const tableInfo = await client.execute("PRAGMA table_info('verifications')");
+    const cols = (tableInfo.rows || []).map((r: any) => String(r.name || r[1]));
+    if (cols.length > 0) {
+      if (!cols.includes('original_estimated_annualized_usd')) {
+        await client.execute('ALTER TABLE verifications ADD COLUMN original_estimated_annualized_usd real;');
+      }
+      if (!cols.includes('audit_id')) {
+        await client.batch(
+          [
+            `ALTER TABLE verifications ADD COLUMN audit_id text REFERENCES audits(id) ON UPDATE no action ON DELETE cascade;`,
+            `DROP INDEX IF EXISTS idx_verifications_finding_id;`,
+            `CREATE INDEX IF NOT EXISTS idx_verifications_finding_id ON verifications (finding_id);`,
+            `CREATE UNIQUE INDEX IF NOT EXISTS idx_verifications_user_audit_finding ON verifications (user_id, audit_id, finding_id);`,
+            `CREATE UNIQUE INDEX IF NOT EXISTS idx_verifications_user_finding_null_audit ON verifications (user_id, finding_id) WHERE audit_id IS NULL;`,
+          ],
+          'write'
+        );
+      }
+    }
+  } catch (err) {
+    // Non-fatal
+  }
+
+  // Upgrade outcome_fee_obligations schema if missing 'audit_id'
+  try {
+    const tableInfo = await client.execute("PRAGMA table_info('outcome_fee_obligations')");
+    const cols = (tableInfo.rows || []).map((r: any) => String(r.name || r[1]));
+    if (cols.length > 0 && !cols.includes('audit_id')) {
+      await client.batch(
+        [
+          `ALTER TABLE outcome_fee_obligations ADD COLUMN audit_id text REFERENCES audits(id) ON UPDATE no action ON DELETE cascade;`,
+          `DROP INDEX IF EXISTS idx_outcome_fee_finding_id;`,
+          `DROP INDEX IF EXISTS idx_outcome_fee_user_finding;`,
+          `CREATE INDEX IF NOT EXISTS idx_outcome_fee_finding_id ON outcome_fee_obligations (finding_id);`,
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_fee_user_audit_finding ON outcome_fee_obligations (user_id, audit_id, finding_id);`,
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_fee_user_finding_null_audit ON outcome_fee_obligations (user_id, finding_id) WHERE audit_id IS NULL;`,
+        ],
+        'write'
+      );
+    }
+  } catch (err) {
+    // Non-fatal
   }
 
   // Safely reconcile legacy records with NULL audit_id ONLY when there is exactly 1 distinct audit
@@ -285,6 +378,23 @@ export async function initializeDatabaseSchema(client: Client): Promise<void> {
              JOIN audits a ON a.id = f.audit_id
              WHERE f.finding_id = finding_ownerships.finding_id
                AND a.user_id = finding_ownerships.owner_id
+           ) = 1;`,
+        `UPDATE entitlements
+         SET audit_id = (
+           SELECT f.audit_id
+           FROM findings f
+           JOIN audits a ON a.id = f.audit_id
+           WHERE f.finding_id = entitlements.finding_id
+             AND a.user_id = entitlements.user_id
+           LIMIT 1
+         )
+         WHERE audit_id IS NULL
+           AND (
+             SELECT COUNT(DISTINCT f.audit_id)
+             FROM findings f
+             JOIN audits a ON a.id = f.audit_id
+             WHERE f.finding_id = entitlements.finding_id
+               AND a.user_id = entitlements.user_id
            ) = 1;`,
       ],
       'write'

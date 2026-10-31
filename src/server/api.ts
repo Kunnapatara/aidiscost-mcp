@@ -1094,7 +1094,8 @@ export function createApiRouter(): Router {
               return;
             }
 
-            const ownerId = await storage.getFindingOwner(findingId);
+            const refundAuditId = customData?.audit_id ? String(customData.audit_id).trim() : undefined;
+            const ownerId = await storage.getFindingOwner(findingId, refundAuditId, userId);
             if (!ownerId || ownerId !== userId) {
               storage.releaseWebhookClaim(eventId);
               res.status(403).json({
@@ -1115,7 +1116,6 @@ export function createApiRouter(): Router {
               processed_at: now,
             };
 
-            const refundAuditId = customData?.audit_id ? String(customData.audit_id).trim() : undefined;
             if (typeof storage.processOrderRefundedWebhookTransaction === 'function') {
               const txRes = await storage.processOrderRefundedWebhookTransaction({
                 event: eventData,
