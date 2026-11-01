@@ -476,21 +476,33 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           }
           findingRecord = await storage.getFinding(audit_id, finding_id);
           if (!findingRecord || findingRecord.user_id !== user.id) {
-            const ownerId = await storage.getFindingOwner(finding_id, audit_id, user.id);
-            if (ownerId !== user.id) {
-              return {
-                isError: true,
-                content: [
-                  {
-                    type: 'text',
-                    text: JSON.stringify({
-                      error: 'FINDING_NOT_FOUND',
-                      message: 'Finding not found or access denied.',
-                    }),
-                  },
-                ],
-              };
-            }
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
+          const ownerId = await storage.getFindingOwner(finding_id, audit_id, user.id);
+          if (ownerId && ownerId !== user.id) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
           }
         } else {
           const userFindings = await storage.findFindingsByFindingId(finding_id, user.id);
@@ -511,6 +523,21 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           }
           if (userFindings.length === 1) {
             findingRecord = userFindings[0];
+            const ownerId = await storage.getFindingOwner(finding_id, findingRecord.audit_id, user.id);
+            if (ownerId && ownerId !== user.id) {
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      error: 'FINDING_NOT_FOUND',
+                      message: 'Finding not found or access denied.',
+                    }),
+                  },
+                ],
+              };
+            }
           } else {
             const ownerId = await storage.getFindingOwner(finding_id, undefined, user.id);
             if (ownerId !== user.id) {

@@ -348,6 +348,18 @@ export class ServerStorage implements IStorage {
       if (legacy.length === 1) {
         return legacy[0].owner_id;
       }
+
+      // Section 2.3: Handle missing ownership record where persisted Finding exists
+      const findingKey = this.findingCompositeKey(auditId, findingId);
+      const persistedFinding = this.data.findings[findingKey];
+      if (persistedFinding) {
+        const persistedAudit = this.data.audits[auditId];
+        if (persistedAudit && persistedAudit.user_id === persistedFinding.user_id) {
+          await this.registerFindingOwnership(findingId, persistedAudit.user_id, auditId);
+          return persistedAudit.user_id;
+        }
+      }
+
       return null;
     }
 
@@ -360,7 +372,19 @@ export class ServerStorage implements IStorage {
       ).values()
     );
 
-    if (uniqueRecords.length === 0) return null;
+    if (uniqueRecords.length === 0) {
+      // Section 2.3: Check persisted findings if finding ownership record is missing
+      const matchingFindings = Object.values(this.data.findings).filter((f) => f.finding_id === findingId);
+      if (matchingFindings.length === 1) {
+        const f = matchingFindings[0];
+        const audit = this.data.audits[f.audit_id];
+        if (audit && audit.user_id === f.user_id) {
+          await this.registerFindingOwnership(findingId, audit.user_id, f.audit_id);
+          return audit.user_id;
+        }
+      }
+      return null;
+    }
     if (uniqueRecords.length > 1) {
       // Multiple audits or owners: fail closed
       return null;

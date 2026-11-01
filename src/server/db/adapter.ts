@@ -267,6 +267,17 @@ export class DrizzleStorageAdapter implements IStorage {
       if (legacyRows.length === 1) {
         return legacyRows[0].ownerId;
       }
+
+      // Section 2.3: Handle missing ownership record where persisted Finding exists
+      const persistedFinding = await this.getFinding(auditId, findingId);
+      if (persistedFinding) {
+        const persistedAudit = await this.getAudit(auditId);
+        if (persistedAudit && persistedAudit.user_id === persistedFinding.user_id) {
+          await this.registerFindingOwnership(findingId, persistedAudit.user_id, auditId);
+          return persistedAudit.user_id;
+        }
+      }
+
       return null;
     }
 
@@ -276,7 +287,19 @@ export class DrizzleStorageAdapter implements IStorage {
       .from(schema.findingOwnerships)
       .where(eq(schema.findingOwnerships.findingId, findingId));
 
-    if (rows.length === 0) return null;
+    if (rows.length === 0) {
+      // Section 2.3: Check persisted findings if finding ownership record is missing
+      const matchingFindings = await this.findFindingsByFindingId(findingId);
+      if (matchingFindings.length === 1) {
+        const f = matchingFindings[0];
+        const audit = await this.getAudit(f.audit_id);
+        if (audit && audit.user_id === f.user_id) {
+          await this.registerFindingOwnership(findingId, audit.user_id, f.audit_id);
+          return audit.user_id;
+        }
+      }
+      return null;
+    }
     if (rows.length > 1) {
       // Multiple audits or owners: fail closed
       return null;
