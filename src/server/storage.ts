@@ -334,6 +334,13 @@ export class ServerStorage implements IStorage {
     );
 
     if (auditId) {
+      // Check if finding is persisted under a different audit_id
+      const allMatchingPersistedFindings = Object.values(this.data.findings).filter((f) => f.finding_id === findingId);
+      if (allMatchingPersistedFindings.length > 0 && !allMatchingPersistedFindings.some((f) => f.audit_id === auditId)) {
+        // Finding exists, but belongs to a different audit: fail closed (mismatch)
+        return null;
+      }
+
       const matching = allOwnerships.find(
         (fo) => fo.finding_id === findingId && fo.audit_id === auditId
       );

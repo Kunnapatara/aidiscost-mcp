@@ -440,6 +440,22 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           };
         }
 
+        if (audit_id !== undefined && (typeof audit_id !== 'string' || !audit_id.trim())) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'INVALID_INPUT',
+                  message: 'audit_id must be a non-empty string if provided.',
+                }),
+              },
+            ],
+          };
+        }
+        const cleanAuditId = audit_id?.trim() || undefined;
+
         // 1. Require authenticated user
         if (!user) {
           return {
@@ -458,8 +474,8 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
 
         // 2. Check ownership - must exist and belong to the authenticated user
         let findingRecord: PersistedFindingRecord | null = null;
-        if (audit_id) {
-          const audit = await storage.getAudit(audit_id);
+        if (cleanAuditId) {
+          const audit = await storage.getAudit(cleanAuditId);
           if (!audit || audit.user_id !== user.id) {
             return {
               isError: true,
@@ -474,7 +490,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
               ],
             };
           }
-          findingRecord = await storage.getFinding(audit_id, finding_id);
+          findingRecord = await storage.getFinding(cleanAuditId, finding_id);
           if (!findingRecord || findingRecord.user_id !== user.id) {
             return {
               isError: true,
@@ -489,7 +505,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
               ],
             };
           }
-          const ownerId = await storage.getFindingOwner(finding_id, audit_id, user.id);
+          const ownerId = await storage.getFindingOwner(finding_id, cleanAuditId, user.id);
           if (ownerId && ownerId !== user.id) {
             return {
               isError: true,
@@ -505,6 +521,21 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
             };
           }
         } else {
+          const allFindings = await storage.findFindingsByFindingId(finding_id);
+          if (allFindings.some((f) => f.user_id !== user.id)) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
           const userFindings = await storage.findFindingsByFindingId(finding_id, user.id);
           if (userFindings.length > 1) {
             return {
@@ -540,7 +571,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
             }
           } else {
             const ownerId = await storage.getFindingOwner(finding_id, undefined, user.id);
-            if (ownerId !== user.id) {
+            if (!ownerId || ownerId !== user.id) {
               return {
                 isError: true,
                 content: [
@@ -638,6 +669,22 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           };
         }
 
+        if (audit_id !== undefined && (typeof audit_id !== 'string' || !audit_id.trim())) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'INVALID_INPUT',
+                  message: 'audit_id must be a non-empty string if provided.',
+                }),
+              },
+            ],
+          };
+        }
+        const cleanAuditId = audit_id?.trim() || undefined;
+
         if (!user) {
           return {
             isError: true,
@@ -654,8 +701,9 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         }
 
         // If audit_id is provided, verify audit exists and belongs to this user
-        if (audit_id) {
-          const audit = await storage.getAudit(audit_id);
+        let findingRecord: PersistedFindingRecord | null = null;
+        if (cleanAuditId) {
+          const audit = await storage.getAudit(cleanAuditId);
           if (!audit || audit.user_id !== user.id) {
             return {
               isError: true,
@@ -670,12 +718,52 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
               ],
             };
           }
-        }
-
-        let findingRecord: PersistedFindingRecord | null = null;
-        if (audit_id) {
-          findingRecord = await storage.getFinding(audit_id, finding_id);
+          findingRecord = await storage.getFinding(cleanAuditId, finding_id);
+          if (!findingRecord || findingRecord.user_id !== user.id) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
+          const ownerId = await storage.getFindingOwner(finding_id, cleanAuditId, user.id);
+          if (ownerId && ownerId !== user.id) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
         } else {
+          const allFindings = await storage.findFindingsByFindingId(finding_id);
+          if (allFindings.some((f) => f.user_id !== user.id)) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
           const userFindings = await storage.findFindingsByFindingId(finding_id, user.id);
           if (userFindings.length > 1) {
             return {
@@ -692,7 +780,36 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
               ],
             };
           }
-          findingRecord = userFindings.length === 1 ? userFindings[0] : null;
+          if (userFindings.length === 0) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
+          findingRecord = userFindings[0];
+          const ownerId = await storage.getFindingOwner(finding_id, findingRecord.audit_id, user.id);
+          if (ownerId && ownerId !== user.id) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
         }
 
         // Must strictly exist and belong to the authenticated user
@@ -894,9 +1011,26 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           }
         }
 
+        if (audit_id !== undefined && (typeof audit_id !== 'string' || !audit_id.trim())) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'INVALID_INPUT',
+                  message: 'audit_id must be a non-empty string if provided.',
+                }),
+              },
+            ],
+          };
+        }
+        const cleanAuditId = audit_id?.trim() || undefined;
+
         // If audit_id is provided, verify audit exists and belongs to this user
-        if (audit_id) {
-          const audit = await storage.getAudit(audit_id);
+        let findingRecord: PersistedFindingRecord | null = null;
+        if (cleanAuditId) {
+          const audit = await storage.getAudit(cleanAuditId);
           if (!audit || audit.user_id !== user.id) {
             return {
               isError: true,
@@ -911,12 +1045,52 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
               ],
             };
           }
-        }
-
-        let findingRecord: PersistedFindingRecord | null = null;
-        if (audit_id) {
-          findingRecord = await storage.getFinding(audit_id, finding_id);
+          findingRecord = await storage.getFinding(cleanAuditId, finding_id);
+          if (!findingRecord || findingRecord.user_id !== user.id) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
+          const ownerId = await storage.getFindingOwner(finding_id, cleanAuditId, user.id);
+          if (ownerId && ownerId !== user.id) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
         } else {
+          const allFindings = await storage.findFindingsByFindingId(finding_id);
+          if (allFindings.some((f) => f.user_id !== user.id)) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
           const userFindings = await storage.findFindingsByFindingId(finding_id, user.id);
           if (userFindings.length > 1) {
             return {
@@ -933,7 +1107,36 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
               ],
             };
           }
-          findingRecord = userFindings.length === 1 ? userFindings[0] : null;
+          if (userFindings.length === 0) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
+          findingRecord = userFindings[0];
+          const ownerId = await storage.getFindingOwner(finding_id, findingRecord.audit_id, user.id);
+          if (ownerId && ownerId !== user.id) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: 'FINDING_NOT_FOUND',
+                    message: 'Finding not found or access denied.',
+                  }),
+                },
+              ],
+            };
+          }
         }
 
         // Must strictly exist and belong to the authenticated user

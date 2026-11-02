@@ -349,9 +349,12 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
-      const auditId = typeof req.query?.audit_id === 'string' && req.query.audit_id.trim()
-        ? req.query.audit_id.trim()
-        : undefined;
+      const rawAuditId = req.query?.audit_id;
+      if (rawAuditId !== undefined && (typeof rawAuditId !== 'string' || !rawAuditId.trim())) {
+        res.status(400).json({ error: 'INVALID_AUDIT', message: 'audit_id must be a non-empty string if provided.' });
+        return;
+      }
+      const auditId = typeof rawAuditId === 'string' ? rawAuditId.trim() : undefined;
 
       if (auditId) {
         const auditRecord = await storage.getAudit(auditId);
@@ -370,11 +373,16 @@ export function createApiRouter(): Router {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
           return;
         }
+        const userFindings = await storage.findFindingsByFindingId(findingId, user.id);
+        if (userFindings.length > 1) {
+          res.status(400).json({ error: 'AMBIGUOUS_FINDING', message: 'Multiple findings match this finding ID across different audits. Please provide audit_id to disambiguate.' });
+          return;
+        }
       }
 
       const ownerId = await storage.getFindingOwner(findingId, auditId, user.id);
-      // Privacy boundary: If finding does not belong to user, return 404 to avoid leaking existence
-      if (ownerId && ownerId !== user.id) {
+      // Privacy boundary: If finding does not belong to user or does not exist, return 404
+      if (!ownerId || ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
@@ -406,7 +414,12 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
-      const auditId = (req.query?.audit_id as string) || undefined;
+      const rawAuditId = req.query?.audit_id;
+      if (rawAuditId !== undefined && (typeof rawAuditId !== 'string' || !rawAuditId.trim())) {
+        res.status(400).json({ error: 'INVALID_AUDIT', message: 'audit_id must be a non-empty string if provided.' });
+        return;
+      }
+      const auditId = typeof rawAuditId === 'string' ? rawAuditId.trim() : undefined;
 
       if (auditId) {
         const auditRecord = await storage.getAudit(auditId);
@@ -425,11 +438,16 @@ export function createApiRouter(): Router {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
           return;
         }
+        const userFindings = await storage.findFindingsByFindingId(findingId, user.id);
+        if (userFindings.length > 1) {
+          res.status(400).json({ error: 'AMBIGUOUS_FINDING', message: 'Multiple findings match this finding ID across different audits. Please provide audit_id to disambiguate.' });
+          return;
+        }
       }
 
-      // Privacy boundary: if finding does not belong to user, return 404 to avoid leaking existence
+      // Privacy boundary: if finding does not belong to user or does not exist, return 404
       const ownerId = await storage.getFindingOwner(findingId, auditId, user.id);
-      if (ownerId && ownerId !== user.id) {
+      if (!ownerId || ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
@@ -472,7 +490,12 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
-      const auditId = (req.query?.audit_id as string) || (req.body?.audit_id as string) || undefined;
+      const rawAuditId = req.query?.audit_id ?? req.body?.audit_id;
+      if (rawAuditId !== undefined && (typeof rawAuditId !== 'string' || !rawAuditId.trim())) {
+        res.status(400).json({ error: 'INVALID_AUDIT', message: 'audit_id must be a non-empty string if provided.' });
+        return;
+      }
+      const auditId = typeof rawAuditId === 'string' ? rawAuditId.trim() : undefined;
 
       let resolvedAuditId = auditId;
       let findingRecord: PersistedFindingRecord | null = null;
@@ -484,9 +507,12 @@ export function createApiRouter(): Router {
           return;
         }
         findingRecord = await storage.getFinding(auditId, findingId);
-        if (findingRecord && findingRecord.user_id !== user.id) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
-          return;
+        if (!findingRecord || findingRecord.user_id !== user.id) {
+          const ownerId = await storage.getFindingOwner(findingId, auditId, user.id);
+          if (!ownerId || ownerId !== user.id) {
+            res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
+            return;
+          }
         }
       } else {
         const userFindings = await storage.findFindingsByFindingId(findingId, user.id);
@@ -507,15 +533,7 @@ export function createApiRouter(): Router {
 
       // Enforce finding ownership
       const ownerId = await storage.getFindingOwner(findingId, resolvedAuditId, user.id);
-      if (ownerId && ownerId !== user.id) {
-        res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
-        return;
-      }
-
-      // Safe repair: Only auto-register if verified findingRecord belongs to user
-      if (!ownerId && findingRecord && findingRecord.user_id === user.id) {
-        await storage.registerFindingOwnership(findingId, user.id, resolvedAuditId);
-      } else if (!ownerId && !findingRecord) {
+      if (!ownerId || ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
@@ -578,7 +596,12 @@ export function createApiRouter(): Router {
       const storage = getStorage();
 
       const { events, finding, file_name } = req.body || {};
-      const auditId = (req.query?.audit_id as string) || (req.body?.audit_id as string) || undefined;
+      const rawAuditId = req.query?.audit_id ?? req.body?.audit_id;
+      if (rawAuditId !== undefined && (typeof rawAuditId !== 'string' || !rawAuditId.trim())) {
+        res.status(400).json({ error: 'INVALID_AUDIT', message: 'audit_id must be a non-empty string if provided.' });
+        return;
+      }
+      const auditId = typeof rawAuditId === 'string' ? rawAuditId.trim() : undefined;
 
       let resolvedAuditId = auditId;
       let findingRecord: PersistedFindingRecord | null = null;
@@ -590,9 +613,12 @@ export function createApiRouter(): Router {
           return;
         }
         findingRecord = await storage.getFinding(auditId, findingId);
-        if (findingRecord && findingRecord.user_id !== user.id) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
-          return;
+        if (!findingRecord || findingRecord.user_id !== user.id) {
+          const ownerId = await storage.getFindingOwner(findingId, auditId, user.id);
+          if (!ownerId || ownerId !== user.id) {
+            res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
+            return;
+          }
         }
       } else {
         const userFindings = await storage.findFindingsByFindingId(findingId, user.id);
@@ -613,15 +639,7 @@ export function createApiRouter(): Router {
 
       // Enforce finding ownership
       const ownerId = await storage.getFindingOwner(findingId, resolvedAuditId, user.id);
-      if (ownerId && ownerId !== user.id) {
-        res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
-        return;
-      }
-
-      // Safe repair: Only auto-register if verified findingRecord belongs to user
-      if (!ownerId && findingRecord && findingRecord.user_id === user.id) {
-        await storage.registerFindingOwnership(findingId, user.id, resolvedAuditId);
-      } else if (!ownerId && !findingRecord) {
+      if (!ownerId || ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
@@ -784,17 +802,20 @@ export function createApiRouter(): Router {
         return;
       }
 
-      // Automatically register ownership if not registered yet
+      // Automatically register ownership if not registered yet (only if verified findingRecord exists)
       let findingRecordForCheckout = cleanAuditId
         ? await storage.getFinding(cleanAuditId, finding_id)
         : (await storage.findFindingsByFindingId(finding_id, user.id))[0];
-      if (!ownerId) {
+      if (!ownerId && findingRecordForCheckout && findingRecordForCheckout.user_id === user.id) {
         const allFindings = await storage.findFindingsByFindingId(finding_id);
         if (allFindings.some((f) => f.user_id !== user.id)) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
           return;
         }
-        await storage.registerFindingOwnership(finding_id, user.id, cleanAuditId || findingRecordForCheckout?.audit_id);
+        await storage.registerFindingOwnership(finding_id, user.id, cleanAuditId || findingRecordForCheckout.audit_id);
+      } else if (!ownerId) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
+        return;
       }
 
       // Check if already entitled
@@ -857,7 +878,12 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
-      const auditId = (req.query?.audit_id as string) || (req.body?.audit_id as string) || undefined;
+      const rawAuditId = req.query?.audit_id ?? req.body?.audit_id;
+      if (rawAuditId !== undefined && (typeof rawAuditId !== 'string' || !rawAuditId.trim())) {
+        res.status(400).json({ error: 'INVALID_AUDIT', message: 'audit_id must be a non-empty string if provided.' });
+        return;
+      }
+      const auditId = typeof rawAuditId === 'string' ? rawAuditId.trim() : undefined;
       let resolvedAuditId = auditId;
 
       if (auditId) {
@@ -871,6 +897,13 @@ export function createApiRouter(): Router {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
           return;
         }
+        if (!findingRecord) {
+          const ownerCheck = await storage.getFindingOwner(findingId, auditId, user.id);
+          if (!ownerCheck || ownerCheck !== user.id) {
+            res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
+            return;
+          }
+        }
       } else {
         const allFindings = await storage.findFindingsByFindingId(findingId);
         if (allFindings.some((f) => f.user_id !== user.id)) {
@@ -878,27 +911,26 @@ export function createApiRouter(): Router {
           return;
         }
         const userFindings = await storage.findFindingsByFindingId(findingId, user.id);
-        if (userFindings.length === 1) {
+        if (userFindings.length === 0) {
+          const ownerCheck = await storage.getFindingOwner(findingId, undefined, user.id);
+          if (!ownerCheck || ownerCheck !== user.id) {
+            res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
+            return;
+          }
+        } else if (userFindings.length === 1) {
           resolvedAuditId = userFindings[0].audit_id;
+        } else {
+          res.status(400).json({ error: 'AMBIGUOUS_FINDING', message: 'Multiple findings match this finding ID across different audits. Please provide audit_id to disambiguate.' });
+          return;
         }
       }
 
       // 1. Verify finding ownership
       const ownerId = await storage.getFindingOwner(findingId, resolvedAuditId, user.id);
-      if (ownerId && ownerId !== user.id) {
+      if (!ownerId || ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
-
-      // Enforce cross-user barrier on existing verification:
-      // If ANY verification exists for this finding belonging to another user, fail closed with 404
-      const anyVerification = await storage.getVerificationByFindingId(findingId, undefined, resolvedAuditId);
-      if (anyVerification && anyVerification.user_id !== user.id) {
-        res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
-        return;
-      }
-
-      const verification = anyVerification;
 
       // Check if an obligation already exists for this finding (Idempotent replay)
       const existing = await storage.getOutcomeFeeObligation(findingId, user.id, resolvedAuditId);
@@ -914,9 +946,14 @@ export function createApiRouter(): Router {
         return;
       }
 
-      if (!ownerId) {
-        await storage.registerFindingOwnership(findingId, user.id, resolvedAuditId);
+      // Enforce cross-user barrier on existing verification:
+      // If ANY verification exists for this finding belonging to another user, fail closed with 404
+      const anyVerification = await storage.getVerificationByFindingId(findingId, undefined, resolvedAuditId);
+      if (anyVerification && anyVerification.user_id !== user.id) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
+        return;
       }
+      const verification = anyVerification;
 
       // 2. Load authoritative verification
       if (!verification) {
@@ -1020,7 +1057,12 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
-      const auditId = (req.query?.audit_id as string) || undefined;
+      const rawAuditId = req.query?.audit_id;
+      if (rawAuditId !== undefined && (typeof rawAuditId !== 'string' || !rawAuditId.trim())) {
+        res.status(400).json({ error: 'INVALID_AUDIT', message: 'audit_id must be a non-empty string if provided.' });
+        return;
+      }
+      const auditId = typeof rawAuditId === 'string' ? rawAuditId.trim() : undefined;
 
       if (auditId) {
         const auditRecord = await storage.getAudit(auditId);
@@ -1042,7 +1084,7 @@ export function createApiRouter(): Router {
       }
 
       const ownerId = await storage.getFindingOwner(findingId, auditId, user.id);
-      if (ownerId && ownerId !== user.id) {
+      if (!ownerId || ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }
@@ -1068,7 +1110,12 @@ export function createApiRouter(): Router {
       const findingId = req.params.id;
       const user = req.user!;
       const storage = getStorage();
-      const auditId = (req.query?.audit_id as string) || (req.body?.audit_id as string) || undefined;
+      const rawAuditId = req.query?.audit_id ?? req.body?.audit_id;
+      if (rawAuditId !== undefined && (typeof rawAuditId !== 'string' || !rawAuditId.trim())) {
+        res.status(400).json({ error: 'INVALID_AUDIT', message: 'audit_id must be a non-empty string if provided.' });
+        return;
+      }
+      const auditId = typeof rawAuditId === 'string' ? rawAuditId.trim() : undefined;
 
       if (auditId) {
         const auditRecord = await storage.getAudit(auditId);
@@ -1090,7 +1137,7 @@ export function createApiRouter(): Router {
       }
 
       const ownerId = await storage.getFindingOwner(findingId, auditId, user.id);
-      if (ownerId && ownerId !== user.id) {
+      if (!ownerId || ownerId !== user.id) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Finding not found.' });
         return;
       }

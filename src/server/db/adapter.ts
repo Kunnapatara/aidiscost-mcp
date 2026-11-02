@@ -237,6 +237,13 @@ export class DrizzleStorageAdapter implements IStorage {
     ownerId?: string
   ): Promise<string | null> {
     if (auditId) {
+      // Check if finding is persisted under a different audit_id
+      const allMatchingPersistedFindings = await this.findFindingsByFindingId(findingId);
+      if (allMatchingPersistedFindings.length > 0 && !allMatchingPersistedFindings.some((f) => f.audit_id === auditId)) {
+        // Finding exists, but belongs to a different audit: fail closed (mismatch)
+        return null;
+      }
+
       const rows = await this.db
         .select()
         .from(schema.findingOwnerships)
