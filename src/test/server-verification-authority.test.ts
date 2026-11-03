@@ -8,7 +8,7 @@ import assert from 'node:assert';
 import http from 'http';
 import express from 'express';
 import cookieParser from 'cookie-parser';
-import { ServerStorage } from '../server/storage';
+import { ServerStorage, setStorage } from '../server/storage';
 import { hashPassword, authenticate } from '../server/auth';
 import { createApiRouter } from '../server/api';
 import { AIEvent, Finding, VerificationState } from '../types/domain';
@@ -62,7 +62,44 @@ describe('AIDisCost — Server-Side Verification Authority Suite', () => {
     is_sample_data: false,
   };
 
+  async function seedAuditAndFinding(userId: string, auditId: string, findingId: string, findingData: Partial<Finding> = {}) {
+    await storage.saveAudit({
+      audit_id: auditId,
+      user_id: userId,
+      source: 'custom_logs',
+      total_spend_usd: 1200,
+      potential_savings_usd: 85,
+      annualized_savings_projection_usd: 1020,
+      is_sample_data: false,
+      findings_count: 1,
+      created_at: new Date().toISOString(),
+    });
+    await storage.saveFinding({
+      audit_id: auditId,
+      finding_id: findingId,
+      user_id: userId,
+      rule_id: 'MODEL_RIGHT_SIZING',
+      title: findingData.title || 'Model Right-Sizing',
+      summary: 'Candidate models provide comparable accuracy at lower unit cost.',
+      baseline_spend_usd: findingData.baseline_spend_usd ?? 100.0,
+      estimated_savings_usd: findingData.estimated_savings_usd ?? 85.0,
+      annualized_projection_usd: findingData.annualized_projection_usd ?? 1020.0,
+      eligible_event_count: findingData.eligible_event_count ?? 50,
+      status: 'DETECTED',
+      is_sample_data: Boolean(findingData.is_sample_data),
+      created_at: new Date().toISOString(),
+      evidence: (findingData as any).evidence || {
+        baseline_period: {
+          start: '2026-09-01T00:00:00.000Z',
+          end: '2026-09-10T00:00:00.000Z',
+        },
+      },
+    });
+    await storage.registerFindingOwnership(findingId, userId, auditId);
+  }
+
   before(async () => {
+    setStorage(storage);
     storage.setTestMode(true);
     storage.clearAll();
 
@@ -119,9 +156,9 @@ describe('AIDisCost — Server-Side Verification Authority Suite', () => {
     });
     userB = { id: uB.id, email: uB.email, cookie: `aidiscost_session=${sB.token}` };
 
-    // Register finding ownerships
-    await storage.registerFindingOwnership(findingA, userA.id);
-    await storage.registerFindingOwnership(findingB, userB.id);
+    // Seed parent audits and findings for userA and userB
+    await seedAuditAndFinding(userA.id, 'adt_01', findingA, mockFindingDataA);
+    await seedAuditAndFinding(userB.id, 'adt_02', findingB, mockFindingDataA);
   });
 
   after(async () => {
@@ -383,6 +420,9 @@ describe('AIDisCost — Server-Side Verification Authority Suite', () => {
     let clientClose: () => void;
 
     before(async () => {
+      if (!fs.existsSync('data')) {
+        fs.mkdirSync('data', { recursive: true });
+      }
       if (fs.existsSync(testDbPath)) {
         fs.rmSync(testDbPath, { force: true });
       }
@@ -410,6 +450,7 @@ describe('AIDisCost — Server-Side Verification Authority Suite', () => {
         fs.rmSync(testDbPath, { force: true });
       }
       delete process.env.TURSO_DATABASE_URL;
+      setStorage(storage);
     });
 
     test('DrizzleStorageAdapter persists authoritative verification to SQLite/libSQL database', async () => {
@@ -498,7 +539,7 @@ describe('AIDisCost — Server-Side Verification Authority Suite', () => {
       };
 
       // Step 1: User A registers ownership of findingE2E
-      await storage.registerFindingOwnership(findingE2E, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', findingE2E, mockFindingE2E);
 
       // Step 2: User A marks deployment on the server
       const deployRes = await fetch(`${serverUrl}/api/findings/${findingE2E}/verification/deploy`, {
@@ -568,7 +609,7 @@ describe('AIDisCost — Server-Side Verification Authority Suite', () => {
   describe('7. Server Failure & Resilience (Sprint A.1 Test 2)', () => {
     test('server verification failure produces no authoritative verification in storage', async () => {
       const failingFindingId = 'fnd_server_fail_test';
-      await storage.registerFindingOwnership(failingFindingId, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', failingFindingId, { ...mockFindingDataA, id: failingFindingId });
 
       // Malformed request with invalid events parameter
       const failRes = await fetch(`${serverUrl}/api/findings/${failingFindingId}/verification/evaluate`, {
@@ -822,7 +863,7 @@ describe('AIDisCost — Server-Side Verification Authority Suite', () => {
       };
 
       // Register ownership
-      await storage.registerFindingOwnership(recoveryFindingId, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', recoveryFindingId, recoveryFinding);
 
       // Deploy finding
       await fetch(`${serverUrl}/api/findings/${recoveryFindingId}/verification/deploy`, {

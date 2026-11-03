@@ -80,6 +80,49 @@ describe('AIDisCost Group B: Entitlement & Billing Integrity Verification Suite'
     return rawToken;
   }
 
+  async function seedTestAuditAndFinding(
+    userId: string,
+    findingId: string,
+    auditId = `audit_${findingId}`,
+    estimatedSavings = 10000
+  ) {
+    await memoryStorage.saveAudit({
+      audit_id: auditId,
+      user_id: userId,
+      source: 'custom_logs',
+      total_spend_usd: 12000,
+      potential_savings_usd: estimatedSavings,
+      annualized_savings_projection_usd: estimatedSavings,
+      is_sample_data: false,
+      health_grade: 'A',
+      health_report: {} as any,
+      findings_count: 1,
+      created_at: new Date().toISOString(),
+    });
+    await memoryStorage.saveFinding({
+      audit_id: auditId,
+      finding_id: findingId,
+      user_id: userId,
+      rule_id: 'RULE_MODEL_RIGHT_SIZING',
+      title: 'Test Finding',
+      summary: 'Summary',
+      affected_scope: 'scope',
+      detection_confidence: 'HIGH',
+      baseline_spend_usd: 12000,
+      candidate_spend_usd: 2000,
+      estimated_savings_usd: estimatedSavings,
+      potential_savings_pct: 80,
+      annualized_projection_usd: estimatedSavings,
+      eligible_event_count: 50,
+      calculation_method: 'DIFFERENTIAL',
+      assumptions: [],
+      evidence: {} as any,
+      status: 'DETECTED',
+      is_sample_data: false,
+      created_at: new Date().toISOString(),
+    });
+  }
+
   // =========================================================================
   // SECTION 1: ENTITLEMENT IDENTITY AND ISOLATION (Phase A & H.1)
   // =========================================================================
@@ -179,6 +222,50 @@ describe('AIDisCost Group B: Entitlement & Billing Integrity Verification Suite'
       await memoryStorage.saveAudit(auditB);
 
       const findingId = 'finding_shared_route_id';
+      await memoryStorage.saveFinding({
+        audit_id: auditA.audit_id,
+        finding_id: findingId,
+        user_id: user.id,
+        rule_id: 'RULE_MODEL_RIGHT_SIZING',
+        title: 'Title',
+        summary: 'Summary',
+        affected_scope: 'scope',
+        detection_confidence: 'HIGH',
+        baseline_spend_usd: 5000,
+        candidate_spend_usd: 4000,
+        estimated_savings_usd: 1000,
+        potential_savings_pct: 20,
+        annualized_projection_usd: 1000,
+        eligible_event_count: 10,
+        calculation_method: 'DIFF',
+        assumptions: [],
+        evidence: {} as any,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: new Date().toISOString(),
+      });
+      await memoryStorage.saveFinding({
+        audit_id: auditB.audit_id,
+        finding_id: findingId,
+        user_id: user.id,
+        rule_id: 'RULE_MODEL_RIGHT_SIZING',
+        title: 'Title',
+        summary: 'Summary',
+        affected_scope: 'scope',
+        detection_confidence: 'HIGH',
+        baseline_spend_usd: 6000,
+        candidate_spend_usd: 4500,
+        estimated_savings_usd: 1500,
+        potential_savings_pct: 25,
+        annualized_projection_usd: 1500,
+        eligible_event_count: 15,
+        calculation_method: 'DIFF',
+        assumptions: [],
+        evidence: {} as any,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: new Date().toISOString(),
+      });
       await memoryStorage.registerFindingOwnership(findingId, user.id, auditA.audit_id);
       await memoryStorage.registerFindingOwnership(findingId, user.id, auditB.audit_id);
 
@@ -510,6 +597,7 @@ describe('AIDisCost Group B: Entitlement & Billing Integrity Verification Suite'
       };
       await memoryStorage.createUser(user);
       const findingId = 'finding_already_active';
+      await seedTestAuditAndFinding(user.id, findingId);
       await memoryStorage.registerFindingOwnership(findingId, user.id);
 
       await memoryStorage.createEntitlement({
@@ -1069,6 +1157,7 @@ describe('AIDisCost Group B: Entitlement & Billing Integrity Verification Suite'
       };
       await memoryStorage.createUser(user);
       const findingId = 'finding_seq_h';
+      await seedTestAuditAndFinding(user.id, findingId);
       await memoryStorage.registerFindingOwnership(findingId, user.id);
 
       // Verification is still in observation / not completed
@@ -1125,6 +1214,7 @@ describe('AIDisCost Group B: Entitlement & Billing Integrity Verification Suite'
       };
       await memoryStorage.createUser(user);
       const findingId = 'finding_fee_calc_1';
+      await seedTestAuditAndFinding(user.id, findingId, undefined, 10000);
       await memoryStorage.registerFindingOwnership(findingId, user.id);
 
       // 10,000 verified savings, original estimate 10,000
@@ -1178,6 +1268,7 @@ describe('AIDisCost Group B: Entitlement & Billing Integrity Verification Suite'
       };
       await memoryStorage.createUser(user);
       const findingId = 'finding_fee_prot_2';
+      await seedTestAuditAndFinding(user.id, findingId, undefined, 10000);
       await memoryStorage.registerFindingOwnership(findingId, user.id);
 
       // Original estimate was 10,000, but verified savings is only 4,000 (40% < 50%)

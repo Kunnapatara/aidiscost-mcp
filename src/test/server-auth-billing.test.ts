@@ -187,6 +187,45 @@ describe('AIDisCost Server — Auth, Entitlement & Billing Tests', () => {
         body: JSON.stringify({ email: 'user1@company.com', password: 'Password123!' }),
       });
       userCookie = res1.headers.get('set-cookie')!.split(';')[0];
+      const data1: any = await res1.json();
+      const user1Id = data1.user.id;
+
+      const memStorage = (await import('../server/storage')).getStorage();
+      await memStorage.saveAudit({
+        audit_id: 'audit_test_user1',
+        user_id: user1Id,
+        source: 'custom_logs',
+        total_spend_usd: 1000,
+        potential_savings_usd: 300,
+        annualized_savings_projection_usd: 3600,
+        is_sample_data: false,
+        health_grade: 'A',
+        health_report: {} as any,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await memStorage.saveFinding({
+        audit_id: 'audit_test_user1',
+        finding_id: testFindingId,
+        user_id: user1Id,
+        rule_id: 'RULE_MODEL_RIGHT_SIZING',
+        title: 'Retry storm finding',
+        summary: 'Summary',
+        affected_scope: 'scope',
+        detection_confidence: 'HIGH',
+        baseline_spend_usd: 1000,
+        candidate_spend_usd: 700,
+        estimated_savings_usd: 300,
+        potential_savings_pct: 30,
+        annualized_projection_usd: 3600,
+        eligible_event_count: 20,
+        calculation_method: 'DIFFERENTIAL',
+        assumptions: [],
+        evidence: {} as any,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: new Date().toISOString(),
+      });
 
       // Create user 2
       const res2 = await fetch(`${serverUrl}/api/auth/register`, {
@@ -257,6 +296,43 @@ describe('AIDisCost Server — Auth, Entitlement & Billing Tests', () => {
       const data: any = await res.json();
       findingOwnerId = data.user.id;
       const cookie = res.headers.get('set-cookie')!.split(';')[0];
+
+      const memStorage = (await import('../server/storage')).getStorage();
+      await memStorage.saveAudit({
+        audit_id: 'audit_finance_lead',
+        user_id: findingOwnerId,
+        source: 'custom_logs',
+        total_spend_usd: 1000,
+        potential_savings_usd: 300,
+        annualized_savings_projection_usd: 3600,
+        is_sample_data: false,
+        health_grade: 'A',
+        health_report: {} as any,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await memStorage.saveFinding({
+        audit_id: 'audit_finance_lead',
+        finding_id: findingToUnlock,
+        user_id: findingOwnerId,
+        rule_id: 'RULE_MODEL_RIGHT_SIZING',
+        title: 'Title',
+        summary: 'Summary',
+        affected_scope: 'scope',
+        detection_confidence: 'HIGH',
+        baseline_spend_usd: 1000,
+        candidate_spend_usd: 700,
+        estimated_savings_usd: 300,
+        potential_savings_pct: 30,
+        annualized_projection_usd: 3600,
+        eligible_event_count: 20,
+        calculation_method: 'DIFFERENTIAL',
+        assumptions: [],
+        evidence: {} as any,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: new Date().toISOString(),
+      });
 
       // Register finding
       await fetch(`${serverUrl}/api/findings/register`, {

@@ -53,6 +53,87 @@ function persistedFindingToDomain(record: PersistedFindingRecord): Finding {
   };
 }
 
+interface McpFindingContext {
+  findingRecord: PersistedFindingRecord;
+  auditRecord: PersistedAuditRecord;
+  resolvedAuditId: string;
+}
+
+/**
+ * Enforces the invariant for MCP tools:
+ * No persisted Finding + no valid parent Audit = no access, no entitlement, no verification.
+ * Does not trust Ownership records as proof that a Finding exists.
+ */
+async function resolveAuthoritativeMcpFinding(
+  storage: IStorage,
+  user: User,
+  findingId: string,
+  rawAuditId: unknown
+): Promise<
+  | { success: true; context: McpFindingContext }
+  | { success: false; error: string; message: string }
+> {
+  if (rawAuditId !== undefined && (typeof rawAuditId !== 'string' || !rawAuditId.trim())) {
+    return { success: false, error: 'INVALID_INPUT', message: 'audit_id must be a non-empty string if provided.' };
+  }
+  const cleanAuditId = typeof rawAuditId === 'string' ? rawAuditId.trim() : undefined;
+
+  let resolvedAuditId: string;
+  let findingRecord: PersistedFindingRecord | null = null;
+  let auditRecord: PersistedAuditRecord | null = null;
+
+  if (cleanAuditId) {
+    auditRecord = await storage.getAudit(cleanAuditId);
+    if (!auditRecord || auditRecord.user_id !== user.id) {
+      return { success: false, error: 'FINDING_NOT_FOUND', message: 'Finding not found or access denied.' };
+    }
+    findingRecord = await storage.getFinding(cleanAuditId, findingId);
+    if (!findingRecord || findingRecord.user_id !== user.id) {
+      return { success: false, error: 'FINDING_NOT_FOUND', message: 'Finding not found or access denied.' };
+    }
+    resolvedAuditId = cleanAuditId;
+  } else {
+    const allFindings = await storage.findFindingsByFindingId(findingId);
+    if (allFindings.some((f) => f.user_id !== user.id)) {
+      return { success: false, error: 'FINDING_NOT_FOUND', message: 'Finding not found or access denied.' };
+    }
+    const userFindings = await storage.findFindingsByFindingId(findingId, user.id);
+    if (userFindings.length === 0) {
+      return { success: false, error: 'FINDING_NOT_FOUND', message: 'Finding not found or access denied.' };
+    }
+    if (userFindings.length > 1) {
+      return {
+        success: false,
+        error: 'AMBIGUOUS_FINDING',
+        message: 'Multiple findings match this finding ID across different audits. Please provide audit_id to disambiguate.',
+      };
+    }
+    findingRecord = userFindings[0];
+    resolvedAuditId = findingRecord.audit_id;
+    auditRecord = await storage.getAudit(resolvedAuditId);
+    if (!auditRecord || auditRecord.user_id !== user.id) {
+      return { success: false, error: 'FINDING_NOT_FOUND', message: 'Finding not found or access denied.' };
+    }
+  }
+
+  const ownerId = await storage.getFindingOwner(findingId, resolvedAuditId, user.id);
+  if (ownerId && ownerId !== user.id) {
+    return { success: false, error: 'FINDING_NOT_FOUND', message: 'Finding not found or access denied.' };
+  }
+  if (!ownerId) {
+    await storage.registerFindingOwnership(findingId, user.id, resolvedAuditId);
+  }
+
+  return {
+    success: true,
+    context: {
+      findingRecord,
+      auditRecord,
+      resolvedAuditId,
+    },
+  };
+}
+
 /**
  * Creates a request-scoped McpServer instance.
  * Binds the authenticated user identity to the tool execution context for isolation.
@@ -454,8 +535,6 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
             ],
           };
         }
-        const cleanAuditId = audit_id?.trim() || undefined;
-
         // 1. Require authenticated user
         if (!user) {
           return {
@@ -472,124 +551,26 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           };
         }
 
-        // 2. Check ownership - must exist and belong to the authenticated user
-        let findingRecord: PersistedFindingRecord | null = null;
-        if (cleanAuditId) {
-          const audit = await storage.getAudit(cleanAuditId);
-          if (!audit || audit.user_id !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          findingRecord = await storage.getFinding(cleanAuditId, finding_id);
-          if (!findingRecord || findingRecord.user_id !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          const ownerId = await storage.getFindingOwner(finding_id, cleanAuditId, user.id);
-          if (ownerId && ownerId !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-        } else {
-          const allFindings = await storage.findFindingsByFindingId(finding_id);
-          if (allFindings.some((f) => f.user_id !== user.id)) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          const userFindings = await storage.findFindingsByFindingId(finding_id, user.id);
-          if (userFindings.length > 1) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'AMBIGUOUS_FINDING',
-                    message:
-                      'Multiple findings match this finding ID across different audits. Please provide audit_id to disambiguate.',
-                  }),
-                },
-              ],
-            };
-          }
-          if (userFindings.length === 1) {
-            findingRecord = userFindings[0];
-            const ownerId = await storage.getFindingOwner(finding_id, findingRecord.audit_id, user.id);
-            if (ownerId && ownerId !== user.id) {
-              return {
-                isError: true,
-                content: [
-                  {
-                    type: 'text',
-                    text: JSON.stringify({
-                      error: 'FINDING_NOT_FOUND',
-                      message: 'Finding not found or access denied.',
-                    }),
-                  },
-                ],
-              };
-            }
-          } else {
-            const ownerId = await storage.getFindingOwner(finding_id, undefined, user.id);
-            if (!ownerId || ownerId !== user.id) {
-              return {
-                isError: true,
-                content: [
-                  {
-                    type: 'text',
-                    text: JSON.stringify({
-                      error: 'FINDING_NOT_FOUND',
-                      message: 'Finding not found or access denied.',
-                    }),
-                  },
-                ],
-              };
-            }
-          }
+        // 2. Validate authoritative finding and parent audit
+        const authResult = await resolveAuthoritativeMcpFinding(storage, user, finding_id, audit_id);
+        if (!authResult.success) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: authResult.error,
+                  message: authResult.message,
+                }),
+              },
+            ],
+          };
         }
 
+        const { resolvedAuditId } = authResult.context;
+
         // 3. Query entitlement and outcome fee obligation
-        const resolvedAuditId = audit_id || findingRecord?.audit_id;
         const isPaid = await storage.hasActivePaidEntitlement(user.id, finding_id, resolvedAuditId);
         const entitlement = await storage.getEntitlement(user.id, finding_id, resolvedAuditId);
         const obligation = await storage.getOutcomeFeeObligation(finding_id, user.id, resolvedAuditId);
@@ -683,8 +664,6 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
             ],
           };
         }
-        const cleanAuditId = audit_id?.trim() || undefined;
-
         if (!user) {
           return {
             isError: true,
@@ -700,164 +679,34 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           };
         }
 
-        // If audit_id is provided, verify audit exists and belongs to this user
-        let findingRecord: PersistedFindingRecord | null = null;
-        if (cleanAuditId) {
-          const audit = await storage.getAudit(cleanAuditId);
-          if (!audit || audit.user_id !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          findingRecord = await storage.getFinding(cleanAuditId, finding_id);
-          if (!findingRecord || findingRecord.user_id !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          const ownerId = await storage.getFindingOwner(finding_id, cleanAuditId, user.id);
-          if (ownerId && ownerId !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-        } else {
-          const allFindings = await storage.findFindingsByFindingId(finding_id);
-          if (allFindings.some((f) => f.user_id !== user.id)) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          const userFindings = await storage.findFindingsByFindingId(finding_id, user.id);
-          if (userFindings.length > 1) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'AMBIGUOUS_FINDING',
-                    message:
-                      'Multiple findings match this finding ID across different audits. Please provide audit_id to disambiguate.',
-                  }),
-                },
-              ],
-            };
-          }
-          if (userFindings.length === 0) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          findingRecord = userFindings[0];
-          const ownerId = await storage.getFindingOwner(finding_id, findingRecord.audit_id, user.id);
-          if (ownerId && ownerId !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-        }
-
-        // Must strictly exist and belong to the authenticated user
-        if (!findingRecord || findingRecord.user_id !== user.id) {
+        const authResult = await resolveAuthoritativeMcpFinding(storage, user, finding_id, audit_id);
+        if (!authResult.success) {
           return {
             isError: true,
             content: [
               {
                 type: 'text',
                 text: JSON.stringify({
-                  error: 'FINDING_NOT_FOUND',
-                  message: 'Finding not found or access denied.',
+                  error: authResult.error,
+                  message: authResult.message,
                 }),
               },
             ],
           };
         }
 
-        // If the finding belongs to an audit, verify parent audit also belongs to user
-        if (findingRecord.audit_id) {
-          const parentAudit = await storage.getAudit(findingRecord.audit_id);
-          if (!parentAudit || parentAudit.user_id !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-        }
-
+        const { findingRecord, resolvedAuditId } = authResult.context;
         const isPaid = await storage.hasActivePaidEntitlement(
           user.id,
           findingRecord.finding_id,
-          findingRecord.audit_id
+          resolvedAuditId
         );
         const domainFinding = persistedFindingToDomain(findingRecord);
         const fixPackage = generateFixPackage(domainFinding, isPaid);
 
         const responsePayload = {
           finding_id: findingRecord.finding_id,
-          audit_id: findingRecord.audit_id,
+          audit_id: resolvedAuditId,
           rule_id: findingRecord.rule_id,
           title: findingRecord.title,
           summary: findingRecord.summary,
@@ -1011,168 +860,23 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
           }
         }
 
-        if (audit_id !== undefined && (typeof audit_id !== 'string' || !audit_id.trim())) {
+        const authResult = await resolveAuthoritativeMcpFinding(storage, user, finding_id, audit_id);
+        if (!authResult.success) {
           return {
             isError: true,
             content: [
               {
                 type: 'text',
                 text: JSON.stringify({
-                  error: 'INVALID_INPUT',
-                  message: 'audit_id must be a non-empty string if provided.',
-                }),
-              },
-            ],
-          };
-        }
-        const cleanAuditId = audit_id?.trim() || undefined;
-
-        // If audit_id is provided, verify audit exists and belongs to this user
-        let findingRecord: PersistedFindingRecord | null = null;
-        if (cleanAuditId) {
-          const audit = await storage.getAudit(cleanAuditId);
-          if (!audit || audit.user_id !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          findingRecord = await storage.getFinding(cleanAuditId, finding_id);
-          if (!findingRecord || findingRecord.user_id !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          const ownerId = await storage.getFindingOwner(finding_id, cleanAuditId, user.id);
-          if (ownerId && ownerId !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-        } else {
-          const allFindings = await storage.findFindingsByFindingId(finding_id);
-          if (allFindings.some((f) => f.user_id !== user.id)) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          const userFindings = await storage.findFindingsByFindingId(finding_id, user.id);
-          if (userFindings.length > 1) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'AMBIGUOUS_FINDING',
-                    message:
-                      'Multiple findings match this finding ID across different audits. Please provide audit_id to disambiguate.',
-                  }),
-                },
-              ],
-            };
-          }
-          if (userFindings.length === 0) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-          findingRecord = userFindings[0];
-          const ownerId = await storage.getFindingOwner(finding_id, findingRecord.audit_id, user.id);
-          if (ownerId && ownerId !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-        }
-
-        // Must strictly exist and belong to the authenticated user
-        if (!findingRecord || findingRecord.user_id !== user.id) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  error: 'FINDING_NOT_FOUND',
-                  message: 'Finding not found or access denied.',
+                  error: authResult.error,
+                  message: authResult.message,
                 }),
               },
             ],
           };
         }
 
-        // If the finding belongs to an audit, verify parent audit also belongs to user
-        if (findingRecord.audit_id) {
-          const parentAudit = await storage.getAudit(findingRecord.audit_id);
-          if (!parentAudit || parentAudit.user_id !== user.id) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: 'FINDING_NOT_FOUND',
-                    message: 'Finding not found or access denied.',
-                  }),
-                },
-              ],
-            };
-          }
-        }
+        const { findingRecord, resolvedAuditId } = authResult.context;
 
         // Ingest post-deployment telemetry
         const ingestPipelineResult = IngestionPipeline.ingest(telemetry_data, {
@@ -1198,7 +902,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         }
 
         const domainFinding = persistedFindingToDomain(findingRecord);
-        const existing = await storage.getVerificationByFindingId(finding_id, user.id, findingRecord.audit_id);
+        const existing = await storage.getVerificationByFindingId(finding_id, user.id, resolvedAuditId);
         const now = new Date().toISOString();
         const deployTime = deployment_timestamp || existing?.deployment_timestamp || now;
         const obsStart = existing?.observation_start || deployTime;
@@ -1244,7 +948,7 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
         const authRecord: AuthoritativeVerification = {
           id: existing?.id || `ver_${crypto.randomUUID()}`,
           finding_id,
-          audit_id: findingRecord.audit_id,
+          audit_id: resolvedAuditId,
           user_id: user.id,
           stage: evaluated.stage,
           is_authoritative: isAuth,
@@ -1271,11 +975,11 @@ export function createMcpServer(user?: User, customStorage?: IStorage): McpServe
 
         await storage.saveVerification(authRecord);
 
-        const obligation = await storage.getOutcomeFeeObligation(finding_id, user.id, findingRecord.audit_id);
+        const obligation = await storage.getOutcomeFeeObligation(finding_id, user.id, resolvedAuditId);
 
         const responsePayload = {
           finding_id,
-          audit_id: findingRecord.audit_id,
+          audit_id: resolvedAuditId,
           verification_stage: evaluated.stage,
           is_authoritative: isAuth,
           is_simulated: Boolean(evaluated.is_simulated),

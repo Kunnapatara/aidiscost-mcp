@@ -9,7 +9,7 @@ import crypto from 'crypto';
 import http from 'http';
 import express from 'express';
 import cookieParser from 'cookie-parser';
-import { ServerStorage } from '../server/storage';
+import { ServerStorage, setStorage } from '../server/storage';
 import { hashPassword, authenticate } from '../server/auth';
 import { createApiRouter } from '../server/api';
 import { verifyLemonSqueezySignature } from '../server/lemon-squeezy';
@@ -72,6 +72,42 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
     is_sample_data: false,
   };
 
+  async function seedAuditAndFinding(userId: string, auditId: string, findingId: string, findingData: Partial<Finding> = {}) {
+    await storage.saveAudit({
+      audit_id: auditId,
+      user_id: userId,
+      source: 'custom_logs',
+      total_spend_usd: 1200,
+      potential_savings_usd: 85,
+      annualized_savings_projection_usd: 12000,
+      is_sample_data: false,
+      findings_count: 1,
+      created_at: new Date().toISOString(),
+    });
+    await storage.saveFinding({
+      audit_id: auditId,
+      finding_id: findingId,
+      user_id: userId,
+      rule_id: 'MODEL_RIGHT_SIZING',
+      title: findingData.title || 'Model Right-Sizing: gpt-4o → gpt-4o-mini',
+      summary: 'Candidate models provide comparable accuracy at lower unit cost.',
+      baseline_spend_usd: findingData.baseline_spend_usd ?? 100.0,
+      estimated_savings_usd: findingData.estimated_savings_usd ?? 85.0,
+      annualized_projection_usd: findingData.annualized_projection_usd ?? 12000.0,
+      eligible_event_count: findingData.eligible_event_count ?? 50,
+      status: 'DETECTED',
+      is_sample_data: Boolean(findingData.is_sample_data),
+      created_at: new Date().toISOString(),
+      evidence: (findingData as any).evidence || {
+        baseline_period: {
+          start: '2026-09-01T00:00:00.000Z',
+          end: '2026-09-10T00:00:00.000Z',
+        },
+      },
+    });
+    await storage.registerFindingOwnership(findingId, userId, auditId);
+  }
+
   before(async () => {
     // Set test configuration for Lemon Squeezy
     process.env.LEMON_SQUEEZY_API_KEY = 'test_ls_api_key';
@@ -80,6 +116,7 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
     process.env.LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID = TEST_OUTCOME_FEE_VARIANT_ID;
     process.env.LEMON_SQUEEZY_WEBHOOK_SECRET = TEST_WEBHOOK_SECRET;
 
+    setStorage(storage);
     storage.setTestMode(true);
     storage.clearAll();
 
@@ -123,9 +160,9 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
     const cookieB = regResB.headers.get('set-cookie') || '';
     userB = { id: regDataB.user.id, email: regDataB.user.email, cookie: cookieB };
 
-    // Register Finding Ownership
-    await storage.registerFindingOwnership(findingA, userA.id);
-    await storage.registerFindingOwnership(findingB, userB.id);
+    // Seed Finding Ownership with valid parent audits
+    await seedAuditAndFinding(userA.id, 'adt_01', findingA, mockFindingA);
+    await seedAuditAndFinding(userB.id, 'adt_02', findingB, mockFindingA);
   });
 
   after(async () => {
@@ -898,7 +935,7 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
 
     test('Case 40: concurrent create requests cannot create duplicate obligations', async () => {
       const findingC = 'fnd_concurrent_test_01';
-      await storage.registerFindingOwnership(findingC, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', findingC, mockFindingA);
 
       const authRecord: AuthoritativeVerification = {
         id: `ver_concurrent_${crypto.randomUUID()}`,
@@ -1180,7 +1217,7 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
   describe('10. Production Hardening Sprint: Invariants Verification (Cases 46-54)', () => {
     test('Case 46: client cannot manipulate original estimate to reduce fee when server verification has canonical estimate', async () => {
       const findingHarden1 = 'fnd_harden_estimate_manipulation_01';
-      await storage.registerFindingOwnership(findingHarden1, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', findingHarden1, mockFindingA);
 
       const authRecord: AuthoritativeVerification = {
         id: `ver_harden_${crypto.randomUUID()}`,
@@ -1225,7 +1262,7 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
 
     test('Case 47: client cannot manipulate original estimate to increase fee beyond cap', async () => {
       const findingHarden2 = 'fnd_harden_estimate_increase_02';
-      await storage.registerFindingOwnership(findingHarden2, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', findingHarden2, mockFindingA);
 
       const authRecord: AuthoritativeVerification = {
         id: `ver_harden_${crypto.randomUUID()}`,
@@ -1321,7 +1358,7 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
 
     test('Case 50: PAID or SETTLED obligation rejects new checkout session (409 Conflict)', async () => {
       const findingPaid = 'fnd_paid_obligation_checkout_rejection';
-      await storage.registerFindingOwnership(findingPaid, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', findingPaid, mockFindingA);
 
       const obligation: OutcomeFeeObligation = {
         id: `of_paid_${crypto.randomUUID()}`,
@@ -1352,7 +1389,7 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
 
     test('Case 51: SETTLED obligation cannot regress to PAID or FAILED on out-of-order webhooks', async () => {
       const findingSettled = 'fnd_settled_monotonic_guard';
-      await storage.registerFindingOwnership(findingSettled, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', findingSettled, mockFindingA);
 
       const obligation: OutcomeFeeObligation = {
         id: `of_settled_${crypto.randomUUID()}`,
@@ -1407,7 +1444,7 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
 
     test('Case 52: PAID obligation cannot regress to FAILED on payment failure webhook', async () => {
       const findingPaid2 = 'fnd_paid_monotonic_guard_02';
-      await storage.registerFindingOwnership(findingPaid2, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', findingPaid2, mockFindingA);
 
       const obligation: OutcomeFeeObligation = {
         id: `of_paid_guard_${crypto.randomUUID()}`,
@@ -1691,7 +1728,7 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
 
     test('Case 57: Direct API endpoint regression: malicious client cannot manipulate original baseline in evaluate or outcome-fee', async () => {
       const findingSec = 'fnd_sec_regression_baseline_01';
-      await storage.registerFindingOwnership(findingSec, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', findingSec, mockFindingA);
 
       // 1. Establish a trusted server-side finding verification with original estimate X = 3,000.0
       // ($250/mo baseline; verified savings of ~$215.45/mo achieves 86.2% realized ratio >= 50% protection threshold)
@@ -1778,7 +1815,7 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
 
     test('Case 58: Webhook HTTP handler failure & retry lifecycle: transient error releases in-flight claim so provider retry succeeds and persists exactly once', async () => {
       const retryFindingId = 'fnd_webhook_handler_retry_01';
-      await storage.registerFindingOwnership(retryFindingId, userA.id);
+      await seedAuditAndFinding(userA.id, 'adt_01', retryFindingId, mockFindingA);
 
       // Create authoritative verification
       const authRecord: AuthoritativeVerification = {

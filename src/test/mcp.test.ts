@@ -280,11 +280,13 @@ describe('AIDisCost — MCP Protocol & Finding Ownership Suite', () => {
     test('Scenario B: Finding owned by User B (same-ID on real storage) -> User A audit does not transfer, claim ownership, or leak User B identity', async () => {
       // 1. Explicitly pre-register the exact finding ID produced by the audit to User B in real storage
       const exactFindingId = 'fnd_right_sizing_gpt-4o_gpt-4o-mini';
-      (storage as any).data.findingOwnerships[exactFindingId] = {
-        finding_id: exactFindingId,
-        owner_id: userB.id,
-        created_at: new Date().toISOString(),
-      };
+      for (const k of Object.keys((storage as any).data.findingOwnerships)) {
+        if (k.includes(exactFindingId)) delete (storage as any).data.findingOwnerships[k];
+      }
+      for (const k of Object.keys((storage as any).data.findings)) {
+        if (k.includes(exactFindingId)) delete (storage as any).data.findings[k];
+      }
+      await storage.registerFindingOwnership(exactFindingId, userB.id);
 
       // Verify User B is the stored owner in real storage
       const initialOwner = await storage.getFindingOwner(exactFindingId);
@@ -519,7 +521,42 @@ describe('AIDisCost — MCP Protocol & Finding Ownership Suite', () => {
     // Scenario D: Entitlement cross-user access
     test('Scenario D: User B cannot access User A protected finding; User A access succeeds', async () => {
       const protectedFindingId = 'fnd_user_a_proprietary_999';
-      await storage.registerFindingOwnership(protectedFindingId, userA.id);
+      await storage.saveAudit({
+        audit_id: 'audit_user_a_prop',
+        user_id: userA.id,
+        source: 'custom_logs',
+        total_spend_usd: 1000,
+        potential_savings_usd: 200,
+        annualized_savings_projection_usd: 2400,
+        is_sample_data: false,
+        health_grade: 'A',
+        health_report: {} as any,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await storage.saveFinding({
+        audit_id: 'audit_user_a_prop',
+        finding_id: protectedFindingId,
+        user_id: userA.id,
+        rule_id: 'RULE_MODEL_RIGHT_SIZING',
+        title: 'Title',
+        summary: 'Summary',
+        affected_scope: 'scope',
+        detection_confidence: 'HIGH',
+        baseline_spend_usd: 1000,
+        candidate_spend_usd: 800,
+        estimated_savings_usd: 200,
+        potential_savings_pct: 20,
+        annualized_projection_usd: 2400,
+        eligible_event_count: 10,
+        calculation_method: 'DIFF',
+        assumptions: [],
+        evidence: {} as any,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: new Date().toISOString(),
+      });
+      await storage.registerFindingOwnership(protectedFindingId, userA.id, 'audit_user_a_prop');
       await storage.createEntitlement({
         id: 'ent_user_a_fix_package',
         user_id: userA.id,
@@ -589,8 +626,78 @@ describe('AIDisCost — MCP Protocol & Finding Ownership Suite', () => {
     test('Scenario E: Concurrent requests under distinct user identities do not cross-contaminate', async () => {
       const findingA = 'fnd_concurrent_a';
       const findingB = 'fnd_concurrent_b';
-      await storage.registerFindingOwnership(findingA, userA.id);
-      await storage.registerFindingOwnership(findingB, userB.id);
+      await storage.saveAudit({
+        audit_id: 'audit_conc_a',
+        user_id: userA.id,
+        source: 'custom_logs',
+        total_spend_usd: 1000,
+        potential_savings_usd: 200,
+        annualized_savings_projection_usd: 2400,
+        is_sample_data: false,
+        health_grade: 'A',
+        health_report: {} as any,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await storage.saveFinding({
+        audit_id: 'audit_conc_a',
+        finding_id: findingA,
+        user_id: userA.id,
+        rule_id: 'RULE_MODEL_RIGHT_SIZING',
+        title: 'Title',
+        summary: 'Summary',
+        affected_scope: 'scope',
+        detection_confidence: 'HIGH',
+        baseline_spend_usd: 1000,
+        candidate_spend_usd: 800,
+        estimated_savings_usd: 200,
+        potential_savings_pct: 20,
+        annualized_projection_usd: 2400,
+        eligible_event_count: 10,
+        calculation_method: 'DIFF',
+        assumptions: [],
+        evidence: {} as any,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: new Date().toISOString(),
+      });
+      await storage.saveAudit({
+        audit_id: 'audit_conc_b',
+        user_id: userB.id,
+        source: 'custom_logs',
+        total_spend_usd: 1000,
+        potential_savings_usd: 200,
+        annualized_savings_projection_usd: 2400,
+        is_sample_data: false,
+        health_grade: 'A',
+        health_report: {} as any,
+        findings_count: 1,
+        created_at: new Date().toISOString(),
+      });
+      await storage.saveFinding({
+        audit_id: 'audit_conc_b',
+        finding_id: findingB,
+        user_id: userB.id,
+        rule_id: 'RULE_MODEL_RIGHT_SIZING',
+        title: 'Title',
+        summary: 'Summary',
+        affected_scope: 'scope',
+        detection_confidence: 'HIGH',
+        baseline_spend_usd: 1000,
+        candidate_spend_usd: 800,
+        estimated_savings_usd: 200,
+        potential_savings_pct: 20,
+        annualized_projection_usd: 2400,
+        eligible_event_count: 10,
+        calculation_method: 'DIFF',
+        assumptions: [],
+        evidence: {} as any,
+        status: 'DETECTED',
+        is_sample_data: false,
+        created_at: new Date().toISOString(),
+      });
+      await storage.registerFindingOwnership(findingA, userA.id, 'audit_conc_a');
+      await storage.registerFindingOwnership(findingB, userB.id, 'audit_conc_b');
 
       const payloadA = {
         jsonrpc: '2.0',

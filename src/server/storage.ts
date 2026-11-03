@@ -320,10 +320,6 @@ export class ServerStorage implements IStorage {
     auditId?: string,
     ownerId?: string
   ): Promise<string | null> {
-    if (!auditId && this.data.findingOwnerships[findingId]) {
-      return this.data.findingOwnerships[findingId].owner_id;
-    }
-
     const allOwnerships = Array.from(
       new Map(
         Object.values(this.data.findingOwnerships).map((fo) => [
@@ -752,9 +748,7 @@ export class ServerStorage implements IStorage {
     const key = this.outcomeFeeCompositeKey(params.obligation.user_id, params.obligation.finding_id, params.obligation.audit_id);
     this.data.outcomeFeeObligations[key] = params.obligation;
     this.data.outcomeFeeObligationsById[params.obligation.id] = key;
-    if (!params.obligation.audit_id) {
-      this.data.outcomeFeeObligations[params.obligation.finding_id] = params.obligation;
-    }
+    this.data.outcomeFeeObligations[params.obligation.finding_id] = params.obligation;
     if (params.entitlement) {
       const entKey = this.entitlementKey(params.entitlement.user_id, params.entitlement.finding_id, params.entitlement.audit_id);
       this.data.entitlements[entKey] = params.entitlement;
