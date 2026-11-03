@@ -278,4 +278,6 @@ export interface AuditSummary {
   is_sample_data: boolean;
   aggregate_is_deduplicated?: boolean;
   deduplication_note?: string;
+  deduplicated_potential_savings_usd?: number;
+  deduplicated_annualized_usd?: number;
 }

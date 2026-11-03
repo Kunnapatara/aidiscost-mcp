@@ -33,6 +33,7 @@ export function evaluateRetryErrorLoop(
   }
 
   const loopEvents: AIEvent[] = [];
+  const seenEventIds = new Set<string>();
   const burstIntervalsMs: number[] = [];
   let observedFailedSpend = 0;
   let totalLoopBursts = 0;
@@ -41,41 +42,68 @@ export function evaluateRetryErrorLoop(
   for (const [, group] of burstGroups.entries()) {
     if (group.length < 3) continue;
 
-    // Check for rapid retry bursts with error/rate-limit statuses
-    let burstStart = 0;
+    // Track genuine consecutive failure bursts
+    let consecutiveErrors: AIEvent[] = [];
+
+    const recordBurstIfValid = () => {
+      if (consecutiveErrors.length >= 2) {
+        totalLoopBursts++;
+        for (let k = 1; k < consecutiveErrors.length; k++) {
+          const interval = new Date(consecutiveErrors[k].timestamp).getTime() - new Date(consecutiveErrors[k - 1].timestamp).getTime();
+          if (interval >= 0) {
+            burstIntervalsMs.push(interval);
+          }
+        }
+        for (const failed of consecutiveErrors) {
+          if (!seenEventIds.has(failed.id)) {
+            seenEventIds.add(failed.id);
+            loopEvents.push(failed);
+            observedFailedSpend += failed.resolved_cost_usd;
+            if (failed.cost_provenance === 'UNPRICED' || failed.cost_provenance === 'UNKNOWN') {
+              hasUnpricedOrEstimated = true;
+            }
+          }
+        }
+      }
+      consecutiveErrors = [];
+    };
+
     for (let i = 0; i < group.length; i++) {
       const current = group[i];
-      const startEv = group[burstStart];
-      const timeDiff = new Date(current.timestamp).getTime() - new Date(startEv.timestamp).getTime();
+      const isFailure = current.status === 'ERROR' || current.status === 'RATE_LIMITED';
 
-      // Within a 60 second window
-      if (timeDiff <= 60_000) {
-        if (i - burstStart >= 2) {
-          // Check if intermediate calls were errors or rate limits
-          const errorAttempts = group.slice(burstStart, i + 1).filter(e => e.status === 'ERROR' || e.status === 'RATE_LIMITED');
-          if (errorAttempts.length >= 2) {
-            totalLoopBursts++;
-            const burstSlice = group.slice(burstStart, i + 1);
-            for (let k = 1; k < burstSlice.length; k++) {
-              const interval = new Date(burstSlice[k].timestamp).getTime() - new Date(burstSlice[k - 1].timestamp).getTime();
-              if (interval >= 0) {
-                burstIntervalsMs.push(interval);
-              }
-            }
-            for (const failed of errorAttempts) {
-              loopEvents.push(failed);
-              observedFailedSpend += failed.resolved_cost_usd;
-              if (failed.cost_provenance === 'UNPRICED' || failed.cost_provenance === 'UNKNOWN') {
-                hasUnpricedOrEstimated = true;
-              }
-            }
-            burstStart = i + 1;
+      if (isFailure) {
+        if (consecutiveErrors.length === 0) {
+          consecutiveErrors.push(current);
+        } else {
+          const prev = consecutiveErrors[consecutiveErrors.length - 1];
+          const timeDiff = new Date(current.timestamp).getTime() - new Date(prev.timestamp).getTime();
+          if (timeDiff <= 60_000) {
+            consecutiveErrors.push(current);
+          } else {
+            recordBurstIfValid();
+            consecutiveErrors.push(current);
           }
         }
       } else {
-        burstStart = i;
+        // Success encountered: if preceded by rapid consecutive errors (within 60s),
+        // the burst just completed. Otherwise, an isolated single error is not a loop.
+        if (consecutiveErrors.length >= 2) {
+          const prev = consecutiveErrors[consecutiveErrors.length - 1];
+          const timeDiff = new Date(current.timestamp).getTime() - new Date(prev.timestamp).getTime();
+          if (timeDiff <= 60_000) {
+            recordBurstIfValid();
+          } else {
+            consecutiveErrors = [];
+          }
+        } else {
+          consecutiveErrors = [];
+        }
       }
     }
+
+    // Flush any trailing burst at the end of the group
+    recordBurstIfValid();
   }
 
   // Require sufficient evidence

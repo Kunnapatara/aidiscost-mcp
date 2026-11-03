@@ -9,6 +9,8 @@ import { evaluateRetryErrorLoop } from './retry-loop';
 import { evaluateRepeatedCallPattern } from './repeated-call';
 import { isValidRuleEvent } from './validation';
 
+import { annualizeSavings } from './annualization';
+
 export function runOptimizationRules(
   events: AIEvent[],
   source: TelemetrySource,
@@ -57,9 +59,29 @@ export function runOptimizationRules(
 
   // Calculate sum of detected opportunity estimates
   // TRUTH BOUNDARY: This aggregate is the arithmetic sum of individual pattern estimates.
-  // Cross-rule portfolio deduplication is not performed; individual opportunities may be potentially overlapping.
+  // Cross-rule portfolio deduplication is not performed on gross aggregate; individual opportunities may be potentially overlapping.
   const potentialSavings = findings.reduce((sum, f) => sum + f.estimated_savings_usd, 0);
   const annualizedProjection = findings.reduce((sum, f) => sum + f.annualized_projection_usd, 0);
+
+  // Portfolio-level deduplication:
+  // If an event is eliminated by caching (REPEATED_CALL_PATTERN), model right-sizing
+  // cannot claim additional savings on that same eliminated redundant call.
+  let deduplicatedSavings = potentialSavings;
+  let deduplicatedAnnualized = annualizedProjection;
+
+  if (findings.length > 1) {
+    const findingA = findings.find(f => f.rule_id === 'MODEL_RIGHT_SIZING');
+    const findingC = findings.find(f => f.rule_id === 'REPEATED_CALL_PATTERN');
+
+    if (findingA && findingC) {
+      const rsSavingsPct = (findingA.potential_savings_pct || 0) / 100;
+      const repeatedSpend = findingC.estimated_savings_usd;
+      const overlapEstimate = Math.min(findingA.estimated_savings_usd, repeatedSpend * rsSavingsPct);
+      deduplicatedSavings = Math.max(0, potentialSavings - overlapEstimate);
+      const ann = annualizeSavings(deduplicatedSavings, health.time_range);
+      deduplicatedAnnualized = ann.annualized_usd;
+    }
+  }
 
   return {
     id: auditId,
@@ -68,6 +90,8 @@ export function runOptimizationRules(
     total_spend_usd: Number(totalSpend.toFixed(4)),
     potential_savings_usd: Number(potentialSavings.toFixed(4)),
     annualized_savings_projection_usd: Number(annualizedProjection.toFixed(2)),
+    deduplicated_potential_savings_usd: Number(deduplicatedSavings.toFixed(4)),
+    deduplicated_annualized_usd: Number(deduplicatedAnnualized.toFixed(2)),
     health,
     findings,
     is_sample_data: isSampleData,

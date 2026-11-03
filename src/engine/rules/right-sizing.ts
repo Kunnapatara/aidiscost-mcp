@@ -4,7 +4,7 @@
  */
 
 import { AIEvent, Finding } from '../../types/domain';
-import { calculateEventCost, lookupModelPricing } from '../pricing/registry';
+import { calculateEventCost, lookupModelPricing, normalizeModelName } from '../pricing/registry';
 import { annualizeSavings, TimeRange } from './annualization';
 import { isValidRuleEvent } from './validation';
 
@@ -47,12 +47,37 @@ const RIGHT_SIZING_CANDIDATES: ModelCandidatePair[] = [
   },
 ];
 
-export function evaluateModelRightSizing(
+/**
+ * Accurately match an event model to a candidate target while ensuring it never matches
+ * the candidate model (e.g. gpt-4o-mini must never match gpt-4o).
+ */
+function matchesCurrentModelStrict(modelKey: string, targetModel: string, candidateModel: string): boolean {
+  const normKey = normalizeModelName(modelKey);
+  const normTarget = normalizeModelName(targetModel);
+  const normCandidate = normalizeModelName(candidateModel);
+
+  // If already running on candidate model, reject immediately
+  if (normKey === normCandidate) return false;
+  const keyPricing = lookupModelPricing(normKey);
+  if (keyPricing && (keyPricing.model === normCandidate || keyPricing.model_aliases.includes(normKey))) {
+    if (keyPricing.model === normCandidate) return false;
+  }
+
+  // Exact match
+  if (normKey === normTarget) return true;
+
+  // Registry match
+  if (keyPricing && keyPricing.model === normTarget) return true;
+
+  return false;
+}
+
+export function evaluateAllModelRightSizing(
   events: AIEvent[],
   auditId: string,
   isSampleData: boolean,
   timeRange?: TimeRange
-): Finding | null {
+): Finding[] {
   // Filter and validate events strictly
   const validEvents: AIEvent[] = [];
   for (const ev of events) {
@@ -70,11 +95,13 @@ export function evaluateModelRightSizing(
     modelGroups.set(m, list);
   }
 
+  const findings: Finding[] = [];
+
   for (const pair of RIGHT_SIZING_CANDIDATES) {
-    // Find matching events for currentModel
+    // Find matching events for currentModel (excluding candidate model instances)
     let matchedEvents: AIEvent[] = [];
     for (const [modelKey, list] of modelGroups.entries()) {
-      if (modelKey.includes(pair.currentModel)) {
+      if (matchesCurrentModelStrict(modelKey, pair.currentModel, pair.candidateModel)) {
         matchedEvents = matchedEvents.concat(list);
       }
     }
@@ -148,7 +175,7 @@ export function evaluateModelRightSizing(
       assumptions.push(annualization.conservative_assumption);
     }
 
-    return {
+    findings.push({
       id: `fnd_right_sizing_${pair.currentModel}_${pair.candidateModel}`,
       audit_id: auditId,
       rule_id: 'MODEL_RIGHT_SIZING',
@@ -209,8 +236,26 @@ export function evaluateModelRightSizing(
       },
       status: 'DETECTED',
       is_sample_data: isSampleData,
-    };
+    });
   }
 
-  return null;
+  return findings;
+}
+
+/**
+ * Evaluates model right-sizing opportunities across all candidate pairs and returns
+ * the finding offering the highest estimated savings (or null if none qualify).
+ */
+export function evaluateModelRightSizing(
+  events: AIEvent[],
+  auditId: string,
+  isSampleData: boolean,
+  timeRange?: TimeRange
+): Finding | null {
+  const allFindings = evaluateAllModelRightSizing(events, auditId, isSampleData, timeRange);
+  if (allFindings.length === 0) return null;
+
+  // Rank by highest estimated savings
+  allFindings.sort((a, b) => b.estimated_savings_usd - a.estimated_savings_usd);
+  return allFindings[0];
 }

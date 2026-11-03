@@ -19,34 +19,45 @@ export function evaluateRepeatedCallPattern(
     return null;
   }
 
-  // Group by (trace_id + prompt_hash) to avoid flag on disparate users
+  // Group by (trace_id + prompt_hash), or fall back to (model + prompt_hash) if trace is omitted
   const sessionPromptGroups = new Map<string, AIEvent[]>();
 
   for (const ev of validEvents) {
-    const contextKey = ev.trace_id ? `${ev.trace_id}:${ev.prompt_hash}` : null;
-    if (!contextKey) continue;
+    const contextKey = ev.trace_id
+      ? `trace:${ev.trace_id}:${ev.prompt_hash}`
+      : `prompt:${ev.model}:${ev.prompt_hash}`;
 
     const list = sessionPromptGroups.get(contextKey) || [];
     list.push(ev);
     sessionPromptGroups.set(contextKey, list);
   }
 
+  const originCalls: AIEvent[] = [];
   const repeatedCalls: AIEvent[] = [];
   let totalClusters = 0;
+  let originSpend = 0;
   let repeatedSpend = 0;
   let hasUnpricedOrEstimated = false;
 
-  for (const [, cluster] of sessionPromptGroups.entries()) {
+  for (const [key, cluster] of sessionPromptGroups.entries()) {
     // Need at least 3 identical calls within the same workflow context
     if (cluster.length < 3) continue;
 
-    // Check time proximity (within 15 minutes)
+    // Check time proximity: 15 minutes for trace-keyed, tighter 5 minutes for unkeyed prompts
     cluster.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
     const spanMs = new Date(cluster[cluster.length - 1].timestamp).getTime() - new Date(cluster[0].timestamp).getTime();
+    const maxAllowedSpanMs = key.startsWith('trace:') ? 15 * 60_000 : 5 * 60_000;
 
-    if (spanMs <= 15 * 60_000) {
+    if (spanMs <= maxAllowedSpanMs) {
       totalClusters++;
       // Call 0 is original execution. Calls 1..N are subsequent identical invocations
+      const origin = cluster[0];
+      originCalls.push(origin);
+      originSpend += origin.resolved_cost_usd;
+      if (origin.cost_provenance === 'UNPRICED' || origin.cost_provenance === 'UNKNOWN') {
+        hasUnpricedOrEstimated = true;
+      }
+
       for (let i = 1; i < cluster.length; i++) {
         repeatedCalls.push(cluster[i]);
         repeatedSpend += cluster[i].resolved_cost_usd;
@@ -61,10 +72,9 @@ export function evaluateRepeatedCallPattern(
     return null;
   }
 
-  const baselineSpend = repeatedSpend + repeatedCalls.reduce((s, e) => {
-    const len = sessionPromptGroups.get(`${e.trace_id}:${e.prompt_hash}`)?.length || 1;
-    return s + (e.resolved_cost_usd / len);
-  }, 0);
+  // Exact arithmetic baseline spend: origin execution spend + subsequent duplicate spend
+  const baselineSpend = originSpend + repeatedSpend;
+  const candidateSpend = originSpend;
 
   // Annualized projection based strictly on actual observed telemetry window
   const annualization = annualizeSavings(repeatedSpend, timeRange);
@@ -107,9 +117,9 @@ export function evaluateRepeatedCallPattern(
     cost_confidence: costConfidence,
     savings_confidence: 'ESTIMATED',
     baseline_spend_usd: Number(baselineSpend.toFixed(4)),
-    candidate_spend_usd: Number((baselineSpend - repeatedSpend).toFixed(4)),
+    candidate_spend_usd: Number(candidateSpend.toFixed(4)),
     estimated_savings_usd: Number(repeatedSpend.toFixed(4)),
-    potential_savings_pct: Number(((repeatedSpend / baselineSpend) * 100).toFixed(1)),
+    potential_savings_pct: baselineSpend > 0 ? Number(((repeatedSpend / baselineSpend) * 100).toFixed(1)) : 0,
     annualized_projection_usd: annualized,
     eligible_event_count: repeatedCalls.length,
     calculation_method: `Sum of billed tokens for subsequent identical prompt executions (attempt > 1) within active 15-minute trace contexts. Savings are estimated and require cache hit validation. ${annualization.methodology_description}`,

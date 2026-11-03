@@ -170,18 +170,38 @@ export function normalizeModelName(rawModel: string): string {
  */
 export function lookupModelPricing(modelName: string): ModelPricing | null {
   const normalized = normalizeModelName(modelName);
+  if (!normalized) return null;
+
+  // 1. Exact match against model or aliases
   for (const entry of INTERNAL_PRICING_REGISTRY) {
     if (entry.model === normalized || entry.model_aliases.includes(normalized)) {
       return entry;
     }
   }
-  // Try partial match
+
+  // 2. Partial prefix match - prioritize longest matching candidate to prevent
+  // more specific models (like 'gpt-4o-mini') from being shadowed by shorter prefixes (like 'gpt-4o')
+  let bestMatch: ModelPricing | null = null;
+  let bestMatchLength = 0;
+
   for (const entry of INTERNAL_PRICING_REGISTRY) {
-    if (normalized.startsWith(entry.model) || entry.model.startsWith(normalized)) {
-      return entry;
+    const candidates = [entry.model, ...entry.model_aliases];
+    for (const candidate of candidates) {
+      if (normalized.startsWith(candidate)) {
+        if (candidate.length > bestMatchLength) {
+          bestMatch = entry;
+          bestMatchLength = candidate.length;
+        }
+      } else if (candidate.startsWith(normalized)) {
+        if (normalized.length > bestMatchLength) {
+          bestMatch = entry;
+          bestMatchLength = normalized.length;
+        }
+      }
     }
   }
-  return null;
+
+  return bestMatch;
 }
 
 /**
