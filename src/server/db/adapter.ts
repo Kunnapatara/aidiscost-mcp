@@ -7,6 +7,7 @@ import { eq, and, or, desc, isNull } from 'drizzle-orm';
 import { LibSQLDatabase } from 'drizzle-orm/libsql';
 import { Client } from '@libsql/client';
 import * as schema from './schema';
+import { verifyDatabaseSchemaPresence } from './index';
 import { IStorage } from '../storage-interface';
 import { User, UserSession, Entitlement, FindingOwnership, ProcessedWebhookEvent, AuthoritativeVerification, OutcomeFeeObligation, OutcomeFeeStatus, PersistedAuditRecord, PersistedFindingRecord } from '../types';
 import { hashSessionToken } from '../auth';
@@ -1053,7 +1054,7 @@ export class DrizzleStorageAdapter implements IStorage {
 
         const existing = existingEntitlementRows[0];
 
-        // Fail closed: enforce exact transaction ID, provider, type, and eligible status
+        // Fail closed: enforce exact transaction ID, provider, and type
         const hasValidTransactionId = Boolean(
           existing.providerTransactionId && existing.providerTransactionId.trim() !== ''
         );
@@ -1061,6 +1062,42 @@ export class DrizzleStorageAdapter implements IStorage {
         const matchesProvider = existing.provider === 'LEMON_SQUEEZY';
         const matchesType = existing.type === 'PAID_FIX_PACKAGE';
         const isEligibleStatus = existing.status === 'ACTIVE';
+
+        // If entitlement was already revoked for this exact order, handle as idempotent success
+        if (matchesOrder && matchesProvider && matchesType && existing.status === 'REVOKED') {
+          await tx
+            .insert(schema.webhookEvents)
+            .values({
+              eventId: params.event.event_id,
+              provider: params.event.provider,
+              eventName: params.event.event_name,
+              userId: params.event.user_id,
+              findingId: params.event.finding_id,
+              orderId: params.event.order_id,
+              processedAt: params.event.processed_at,
+            })
+            .onConflictDoNothing();
+
+          this.processedWebhooksCache.add(params.event.event_id);
+          this.inFlightWebhooks.delete(params.event.event_id);
+
+          return {
+            status: 'SUCCESS',
+            entitlement: {
+              id: existing.id,
+              user_id: existing.userId,
+              audit_id: existing.auditId || undefined,
+              finding_id: existing.findingId,
+              type: existing.type as any,
+              status: 'REVOKED',
+              provider: existing.provider as any,
+              provider_transaction_id: existing.providerTransactionId,
+              amount_usd: existing.amountUsd,
+              created_at: existing.createdAt,
+              updated_at: existing.updatedAt,
+            },
+          };
+        }
 
         if (!matchesOrder || !matchesProvider || !matchesType || !isEligibleStatus) {
           this.inFlightWebhooks.delete(params.event.event_id);
@@ -1528,10 +1565,23 @@ export class DrizzleStorageAdapter implements IStorage {
   // --- Health & Readiness Check ---
   async checkReadiness(): Promise<boolean> {
     try {
-      const result = await this.client.execute('SELECT 1 as healthy;');
-      return Boolean(result && Array.isArray(result.rows) && result.rows.length > 0);
+      const ping = await this.client.execute('SELECT 1 as healthy;');
+      if (!ping || !Array.isArray(ping.rows) || ping.rows.length === 0) {
+        return false;
+      }
+      const schemaCheck = await verifyDatabaseSchemaPresence(this.client);
+      return schemaCheck.ready;
     } catch {
       return false;
+    }
+  }
+
+  // --- Resource Lifecycle ---
+  close(): void {
+    try {
+      this.client.close();
+    } catch {
+      // Ignore cleanup error if client is already closed
     }
   }
 }

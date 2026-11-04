@@ -180,9 +180,13 @@ Add the following to your `claude_desktop_config.json`:
       "env": {
         "NODE_ENV": "production",
         "PORT": "3000",
-        "SESSION_SECRET": "your-session-secret",
         "TURSO_DATABASE_URL": "libsql://your-db.turso.io",
-        "TURSO_AUTH_TOKEN": "your-turso-auth-token"
+        "TURSO_AUTH_TOKEN": "your-turso-auth-token",
+        "LEMON_SQUEEZY_API_KEY": "your-api-key",
+        "LEMON_SQUEEZY_STORE_ID": "your-store-id",
+        "LEMON_SQUEEZY_VARIANT_ID": "your-fix-pkg-variant-id",
+        "LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID": "your-outcome-fee-variant-id",
+        "LEMON_SQUEEZY_WEBHOOK_SECRET": "your-webhook-secret"
       }
     }
   }
@@ -217,7 +221,31 @@ Add to `.cursor/mcp.json` or your Cursor MCP Settings:
 
 ---
 
-## 6. Testing & Quality Verification
+## 6. Production Operations & Database Lifecycle
+
+### Database Provisioning & Explicit Migrations
+AIDisCost MCP uses Turso / libSQL with Drizzle ORM.
+- **Fail-Closed Preflight:** In production (`NODE_ENV=production`), the server enforces `TURSO_DATABASE_URL` (and `TURSO_AUTH_TOKEN` for remote `libsql://` or `https://` URLs) and validates that the database is reachable with all required tables present before listening on port 3000.
+- **Explicit Migrations Required:** Production startup does **not** run auto-DDL to protect against race conditions in multi-instance deployments. Apply versioned migrations explicitly before booting:
+  ```bash
+  npm run db:migrate
+  ```
+- **Readiness vs Liveness Probes:**
+  - `GET /api/health/live`: Lightweight probe returning 200 without executing database queries (safe for Kubernetes/Cloud Run liveness checks).
+  - `GET /api/health/ready`: Deep readiness probe verifying database reachability and table schema presence (returns 503 if unreachable or tables missing).
+
+### Multi-Instance Webhook Idempotency
+- Webhook events are transactionally committed with a unique constraint on `event_id` in the `webhook_events` table.
+- Monotonic guards ensure that delayed `order_created` events cannot reactivate an already revoked entitlement.
+- Cross-instance duplicate deliveries are handled safely and idempotently by the database transaction.
+
+### Rate Limiting Architecture
+- The MCP endpoint includes a process-local rate limiter (60 requests/minute per authenticated user or client IP).
+- For distributed multi-instance production deployments, configure an upstream API Gateway, Cloudflare, or Cloud Armor for edge rate limiting.
+
+---
+
+## 7. Testing & Quality Verification
 
 ```bash
 # Run full unit and integration test suite
@@ -235,7 +263,7 @@ npm run build
 
 ---
 
-## 7. Security Invariants & Defensive Design
+## 8. Security Invariants & Defensive Design
 
 1. **Session Token Hashing at Rest:**
    - Raw session tokens are never stored in plain text. Only SHA-256 digests are persisted in storage.

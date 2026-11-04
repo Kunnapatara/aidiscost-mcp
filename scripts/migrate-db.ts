@@ -18,8 +18,27 @@ export async function runDatabaseMigrations(): Promise<void> {
     );
   }
 
+  if (
+    isProduction &&
+    url &&
+    (url.startsWith('libsql://') || url.startsWith('https://')) &&
+    !authToken
+  ) {
+    throw new Error(
+      '[FATAL MIGRATION ERROR] In production with a remote Turso database, TURSO_AUTH_TOKEN is required to run migrations.'
+    );
+  }
+
   console.log('[DB Migrate] Connecting to database...');
   const { db, client } = createDatabaseConnection({ url, authToken });
+
+  // Preflight check: verify database is reachable before executing migrations
+  try {
+    await client.execute('SELECT 1 as ping;');
+  } catch (pingErr: any) {
+    client.close();
+    throw new Error(`[FATAL MIGRATION ERROR] Unable to reach database: ${pingErr?.message || pingErr}`);
+  }
 
   const migrationsFolder = path.resolve(process.cwd(), 'drizzle', 'migrations');
   console.log(`[DB Migrate] Applying versioned Drizzle migrations from ${migrationsFolder}...`);

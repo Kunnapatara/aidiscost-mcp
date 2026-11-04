@@ -17,22 +17,74 @@ export interface DatabaseInstance {
   db: LibSQLDatabase<typeof schema>;
 }
 
+export const REQUIRED_DATABASE_TABLES = [
+  'users',
+  'sessions',
+  'audits',
+  'findings',
+  'finding_ownerships',
+  'entitlements',
+  'verifications',
+  'outcome_fee_obligations',
+  'webhook_events',
+] as const;
+
 export function createDatabaseConnection(config?: DatabaseConfig): DatabaseInstance {
-  const url =
-    config?.url ||
-    process.env.TURSO_DATABASE_URL ||
-    (process.env.NODE_ENV === 'test' ? ':memory:' : 'file:data/aidiscost.db');
+  const isProd = process.env.NODE_ENV === 'production';
+  const url = config?.url || process.env.TURSO_DATABASE_URL;
+
+  // In production, silent fallback to local/in-memory storage is strictly prohibited
+  if (isProd && !url) {
+    throw new Error(
+      '[FATAL PRODUCTION CONFIGURATION ERROR] In production (NODE_ENV=production), TURSO_DATABASE_URL is required. ' +
+      'Silent fallback to local in-memory or filesystem database is strictly prohibited.'
+    );
+  }
+
+  const resolvedUrl =
+    url || (process.env.NODE_ENV === 'test' ? ':memory:' : 'file:data/aidiscost.db');
 
   const authToken = config?.authToken || process.env.TURSO_AUTH_TOKEN;
 
+  if (
+    isProd &&
+    (resolvedUrl.startsWith('libsql://') || resolvedUrl.startsWith('https://')) &&
+    !authToken
+  ) {
+    throw new Error(
+      '[FATAL PRODUCTION CONFIGURATION ERROR] In production with a remote Turso database, TURSO_AUTH_TOKEN is required.'
+    );
+  }
+
   const client = createClient({
-    url,
+    url: resolvedUrl,
     authToken,
   });
 
   const db = drizzle(client, { schema });
 
   return { client, db };
+}
+
+/**
+ * Checks whether the required application tables exist in the database.
+ * Used by startup preflight and readiness health checks.
+ */
+export async function verifyDatabaseSchemaPresence(client: Client): Promise<{ ready: boolean; missingTables: string[] }> {
+  try {
+    const result = await client.execute("SELECT name FROM sqlite_master WHERE type='table';");
+    const existingTables = new Set((result.rows || []).map((r: any) => String(r.name || r[0])));
+    const missingTables = REQUIRED_DATABASE_TABLES.filter((t) => !existingTables.has(t));
+    return {
+      ready: missingTables.length === 0,
+      missingTables,
+    };
+  } catch (err) {
+    return {
+      ready: false,
+      missingTables: [...REQUIRED_DATABASE_TABLES],
+    };
+  }
 }
 
 /**

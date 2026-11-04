@@ -104,4 +104,5 @@ export interface IStorage {
   // --- Test & Lifecycle Helpers ---
   clearAll?(): Promise<void> | void;
   setTestMode?(isTest: boolean): void;
+  close?(): Promise<void> | void;
 }

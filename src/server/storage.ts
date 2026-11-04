@@ -710,7 +710,7 @@ export class ServerStorage implements IStorage {
       return { status: 'NOT_FOUND' };
     }
 
-    // Fail closed: enforce exact transaction ID, provider, type, and eligible status
+    // Fail closed: enforce exact transaction ID, provider, and type
     const hasValidTransactionId = Boolean(
       existing.provider_transaction_id && existing.provider_transaction_id.trim() !== ''
     );
@@ -718,6 +718,14 @@ export class ServerStorage implements IStorage {
     const matchesProvider = existing.provider === 'LEMON_SQUEEZY';
     const matchesType = existing.type === 'PAID_FIX_PACKAGE';
     const isEligibleStatus = existing.status === 'ACTIVE';
+
+    // If entitlement was already revoked for this exact order, handle as idempotent success
+    if (matchesOrder && matchesProvider && matchesType && existing.status === 'REVOKED') {
+      this.data.processedWebhooks[params.event.event_id] = params.event;
+      this.inFlightWebhooks.delete(params.event.event_id);
+      this.flushToDisk();
+      return { status: 'SUCCESS', entitlement: existing };
+    }
 
     if (!matchesOrder || !matchesProvider || !matchesType || !isEligibleStatus) {
       this.inFlightWebhooks.delete(params.event.event_id);

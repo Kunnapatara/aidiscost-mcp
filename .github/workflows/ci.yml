@@ -28,6 +28,11 @@ jobs:
       - name: TypeScript Typecheck
         run: bun run lint
 
+      - name: Verify Database Migrations
+        run: bun run db:migrate
+        env:
+          TURSO_DATABASE_URL: "file:data/ci-test.db"
+
       - name: Run Test Suite
         run: bun run test
 

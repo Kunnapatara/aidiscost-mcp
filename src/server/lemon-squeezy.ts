@@ -9,7 +9,7 @@ import { LemonSqueezyConfig } from './types';
 export function getLemonSqueezyConfig(): LemonSqueezyConfig {
   const apiKey = (process.env.LEMON_SQUEEZY_API_KEY || '').trim();
   const storeId = (process.env.LEMON_SQUEEZY_STORE_ID || '').trim();
-  const variantId = (process.env.LEMON_SQUEEZY_VARIANT_ID || '').trim();
+  const variantId = (process.env.LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID || process.env.LEMON_SQUEEZY_VARIANT_ID || '').trim();
   const outcomeFeeVariantId = (process.env.LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID || '').trim();
   const webhookSecret = (process.env.LEMON_SQUEEZY_WEBHOOK_SECRET || '').trim();
 
