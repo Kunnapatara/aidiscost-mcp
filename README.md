@@ -303,8 +303,34 @@ The system strictly separates database operational health from payment operation
 
 ### Lemon Squeezy Sandbox E2E Runner
 ```bash
-# Verify Lemon Squeezy Sandbox E2E runner (fails closed safely if credentials are absent)
+# Execute Lemon Squeezy Sandbox E2E verification
 npm run test:sandbox
 ```
-When real credentials are absent, the runner safely outputs `STATUS: BLOCKED — credentials unavailable` with clear setup diagnostics, without fabricating test transactions or throwing unexpected errors.
+- **Strict Sandbox Enforcement:** Before making any outbound API requests, the runner strictly validates that `LEMON_SQUEEZY_SANDBOX=true` is set, `NODE_ENV` is NOT `production`, and `LEMON_SQUEEZY_SANDBOX_API_KEY` is explicitly configured. Silent fallback to production keys is prohibited.
+- **Explicit Exit Codes:**
+  - `0`: PASS — All 11 steps executed and verified against application database state.
+  - `1`: FAIL — An assertion failed or unexpected error occurred.
+  - `2`: BLOCKED — Required external sandbox credentials are unavailable.
+- **Machine-Readable Artifact:** The runner automatically outputs a comprehensive JSON report to `sandbox-e2e-result.json` containing `overall_status`, `steps`, `assertions`, `provider_request_ids`, and reasons, without leaking secrets.
+
+### Remote Turso Migrations Verification (0000 -> 0008)
+```bash
+# Execute migration verification against a dedicated disposable Remote Turso database
+npm run test:turso
+```
+- **Anti-Production Safety Guard:** The runner refuses to execute if `NODE_ENV=production` or if the database URL matches production naming patterns (`prod`, `production`, `live`). The database URL must contain `test`, `dev`, `sandbox`, `temp`, or `disposable`, or require explicit `TURSO_ALLOW_TEST_MIGRATIONS=true`.
+- **Exit Codes:**
+  - `0`: PASS — All migrations 0000–0008 applied cleanly, all 11 required tables and columns verified, and CRUD operations confirmed.
+  - `1`: FAIL — Migration failed or schema mismatch detected.
+  - `2`: BLOCKED — Remote Turso test credentials unavailable.
+- **Disposable Database Workflow:**
+  ```bash
+  turso db create aidiscost-test-disposable
+  turso db show aidiscost-test-disposable --url
+  turso db tokens create aidiscost-test-disposable
+  export TURSO_TEST_DATABASE_URL=libsql://aidiscost-test-disposable-<org>.turso.io
+  export TURSO_TEST_AUTH_TOKEN=<token>
+  npm run test:turso
+  turso db destroy aidiscost-test-disposable
+  ```
 
