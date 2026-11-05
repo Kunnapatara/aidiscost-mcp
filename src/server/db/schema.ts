@@ -106,9 +106,10 @@ export const outcomeFeeObligations = sqliteTable('outcome_fee_obligations', {
   verifiedAnnualizedSavingsUsd: real('verified_annualized_savings_usd').notNull(),
   feeAmountUsd: real('fee_amount_usd').notNull(),
   currency: text('currency').notNull().default('USD'),
-  status: text('status').notNull(), // 'PAYABLE' | 'CHECKOUT_CREATED' | 'PAID' | 'SETTLED' | 'FAILED'
+  status: text('status').notNull(), // 'PAYABLE' | 'CHECKOUT_CREATED' | 'PAID' | 'SETTLED' | 'FAILED' | 'REFUNDED'
   provider: text('provider').notNull().default('LEMON_SQUEEZY'),
   checkoutUrl: text('checkout_url'),
+  checkoutId: text('checkout_id'),
   providerOrderId: text('provider_order_id'),
   providerTransactionId: text('provider_transaction_id'),
   paidAt: text('paid_at'),
@@ -118,6 +119,44 @@ export const outcomeFeeObligations = sqliteTable('outcome_fee_obligations', {
   uniqueIndex('idx_outcome_fee_user_audit_finding').on(table.userId, table.auditId, table.findingId),
   index('idx_outcome_fee_finding_id').on(table.findingId),
   index('idx_outcome_fee_user_id').on(table.userId),
+]);
+
+export const checkoutAttempts = sqliteTable('checkout_attempts', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  auditId: text('audit_id').references(() => audits.id, { onDelete: 'cascade' }),
+  findingId: text('finding_id').notNull(),
+  product: text('product').notNull(), // 'FIX_PACKAGE' | 'OUTCOME_FEE'
+  checkoutUrl: text('checkout_url').notNull(),
+  checkoutId: text('checkout_id'),
+  status: text('status').notNull().default('PENDING'), // 'PENDING' | 'COMPLETED' | 'EXPIRED'
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  uniqueIndex('idx_checkout_attempts_user_audit_finding_product').on(table.userId, table.auditId, table.findingId, table.product),
+  index('idx_checkout_attempts_finding_id').on(table.findingId),
+  index('idx_checkout_attempts_user_id').on(table.userId),
+]);
+
+export const paymentReconciliations = sqliteTable('payment_reconciliations', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  auditId: text('audit_id').references(() => audits.id, { onDelete: 'cascade' }),
+  findingId: text('finding_id').notNull(),
+  product: text('product').notNull(), // 'FIX_PACKAGE' | 'OUTCOME_FEE'
+  primaryOrderId: text('primary_order_id').notNull(),
+  duplicateOrderId: text('duplicate_order_id').notNull(),
+  amountUsd: real('amount_usd').notNull(),
+  currency: text('currency').notNull().default('USD'),
+  status: text('status').notNull().default('NEEDS_REFUND_REVIEW'), // 'NEEDS_REFUND_REVIEW' | 'REFUNDED' | 'DISMISSED'
+  reason: text('reason').notNull(), // 'DUPLICATE_ORDER' | 'AMOUNT_MISMATCH' | 'PARTIAL_REFUND'
+  notes: text('notes'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_payment_reconciliations_finding_id').on(table.findingId),
+  index('idx_payment_reconciliations_user_id').on(table.userId),
+  index('idx_payment_reconciliations_status').on(table.status),
 ]);
 
 export const audits = sqliteTable('audits', {
@@ -182,3 +221,7 @@ export type AuditRow = typeof audits.$inferSelect;
 export type AuditInsert = typeof audits.$inferInsert;
 export type FindingRow = typeof findings.$inferSelect;
 export type FindingInsert = typeof findings.$inferInsert;
+export type CheckoutAttemptRow = typeof checkoutAttempts.$inferSelect;
+export type CheckoutAttemptInsert = typeof checkoutAttempts.$inferInsert;
+export type PaymentReconciliationRow = typeof paymentReconciliations.$inferSelect;
+export type PaymentReconciliationInsert = typeof paymentReconciliations.$inferInsert;

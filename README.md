@@ -280,3 +280,31 @@ npm run build
 4. **Authoritative Truth Invariant:**
    - Simulated/demo datasets (`is_sample_data: true`) can never establish commercial verification or outcome fee obligations.
    - Unit-cost comparisons require equal scope, chronological observation windows, and a minimum of 15 post-deployment events.
+
+---
+
+## 9. Payment Integrity & Production Billing Readiness
+
+### Fail-Closed Payment Configuration
+- **Mandatory Webhook Secret:** Both Fix Package ($49.00 USD) and Outcome Fee (20% verified savings) checkout creation endpoints fail closed if `LEMON_SQUEEZY_WEBHOOK_SECRET` is missing. Checkout sessions are never issued when the backend is unable to cryptographically authenticate payment webhooks.
+- **Variant ID Separation:** The application strictly enforces distinct variant IDs for Fix Package (`LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID`) and Outcome Fee (`LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID`). Attempting to use identical variant IDs for both products is rejected with `VARIANT_COLLISION`.
+- **Payment Verification Integrity:** Webhooks validate the exact paid amount and currency (USD). A Fix Package order must equal exactly 4,900 cents ($49.00 USD), and Outcome Fee payments must match the server-calculated obligation amount in cents. Mismatches and partial refunds are quarantined into `payment_reconciliations` without granting unauthorized access.
+
+### Refund State Machine & Reconciliation
+- **Outcome Fee Refund Lifecycle:** Supports an explicit `REFUNDED` status across the persistence adapter, migrations (`0008`), and API.
+- **Monotonic Progression:** Webhook state updates enforce monotonic progression: late or duplicate `order_created` or `order_settled` events are mathematically prohibited from regressing a `REFUNDED` obligation back to `PAID` or `SETTLED`.
+- **Duplicate Checkout & Concurrent Payment Handling:** Active pending checkouts are tracked per `(user_id, finding_id, product)` in `checkout_attempts`. Subsequent requests within 30 minutes return the existing checkout session without creating redundant provider sessions. If duplicate orders are completed for the same entitlement, the primary transaction is updated and the duplicate is logged to `payment_reconciliations` for review.
+
+### Billing Readiness vs. Database Readiness
+The system strictly separates database operational health from payment operational readiness:
+- `GET /api/health/ready`: Asserts database reachability and table schema presence.
+- `GET /api/billing/readiness` (and `GET /api/health/billing`): Evaluates payment gateway credentials, webhook secret configuration, variant differentiation, and database adapter readiness.
+- `GET /api/billing/reconciliations`: Exposes flagged duplicate orders, amount mismatches, and partial refunds requiring manual review.
+
+### Lemon Squeezy Sandbox E2E Runner
+```bash
+# Verify Lemon Squeezy Sandbox E2E runner (fails closed safely if credentials are absent)
+npm run test:sandbox
+```
+When real credentials are absent, the runner safely outputs `STATUS: BLOCKED — credentials unavailable` with clear setup diagnostics, without fabricating test transactions or throwing unexpected errors.
+

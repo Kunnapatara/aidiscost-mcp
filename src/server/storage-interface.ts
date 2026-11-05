@@ -13,6 +13,8 @@ import {
   OutcomeFeeObligation,
   PersistedAuditRecord,
   PersistedFindingRecord,
+  CheckoutAttempt,
+  PaymentReconciliation,
 } from './types';
 
 export interface IStorage {
@@ -59,6 +61,14 @@ export interface IStorage {
   getOutcomeFeeObligationById(obligationId: string, userId?: string): Promise<OutcomeFeeObligation | null>;
   updateOutcomeFeeObligation(obligation: OutcomeFeeObligation): Promise<OutcomeFeeObligation>;
   hasPaidOutcomeFee(userId: string, findingId: string, auditId?: string): Promise<boolean>;
+
+  // --- Checkout Attempts & Concurrency Operations ---
+  saveCheckoutAttempt?(attempt: CheckoutAttempt): Promise<CheckoutAttempt>;
+  getActiveCheckoutAttempt?(userId: string, findingId: string, product: 'FIX_PACKAGE' | 'OUTCOME_FEE', auditId?: string): Promise<CheckoutAttempt | null>;
+
+  // --- Payment Reconciliation Operations ---
+  savePaymentReconciliation?(reconciliation: PaymentReconciliation): Promise<PaymentReconciliation>;
+  listPaymentReconciliations?(userId?: string, findingId?: string): Promise<PaymentReconciliation[]>;
 
   // --- Webhook Idempotency Operations ---
   isWebhookEventProcessed(eventId: string): Promise<boolean>;

@@ -21,8 +21,19 @@ import {
   verifyLemonSqueezySignature,
   createLemonSqueezyCheckout,
   createLemonSqueezyOutcomeFeeCheckout,
+  validateLemonSqueezyPaymentReadiness,
 } from './lemon-squeezy';
-import { User, Entitlement, AuthoritativeVerification, OutcomeFeeObligation, OutcomeFeeStatus, PersistedFindingRecord, PersistedAuditRecord } from './types';
+import {
+  User,
+  Entitlement,
+  AuthoritativeVerification,
+  OutcomeFeeObligation,
+  OutcomeFeeStatus,
+  PersistedFindingRecord,
+  PersistedAuditRecord,
+  CheckoutAttempt,
+  PaymentReconciliation,
+} from './types';
 import { IStorage } from './storage-interface';
 import {
   evaluateVerification,
@@ -734,14 +745,37 @@ export function createApiRouter(): Router {
         return;
       }
 
-      // Check configuration
+      // Check configuration (fail closed: requires API key, store ID, variant ID, and webhook secret)
       const config = getLemonSqueezyConfig();
-      if (!config.isConfigured) {
+      if (!config.isConfigured || !config.apiKey || !config.storeId || !config.variantId || !config.webhookSecret) {
         res.status(503).json({
           error: 'BILLING_NOT_CONFIGURED',
           message: 'Fix Package checkout is not currently available.',
         });
         return;
+      }
+
+      if (config.outcomeFeeVariantId && config.variantId === config.outcomeFeeVariantId) {
+        res.status(500).json({
+          error: 'CONFIGURATION_ERROR',
+          message: 'Fix Package variant must not match Outcome Fee variant.',
+        });
+        return;
+      }
+
+      // Prevent duplicate checkout sessions by reusing open active checkout attempt
+      if (typeof storage.getActiveCheckoutAttempt === 'function') {
+        const activeAttempt = await storage.getActiveCheckoutAttempt(user.id, finding_id, 'FIX_PACKAGE', resolvedAuditId);
+        if (activeAttempt && activeAttempt.checkout_url) {
+          res.json({
+            success: true,
+            checkout_url: activeAttempt.checkout_url,
+            finding_id,
+            amount_usd: 49.0,
+            reused_existing: true,
+          });
+          return;
+        }
       }
 
       // Initiate real checkout with Lemon Squeezy API
@@ -752,6 +786,23 @@ export function createApiRouter(): Router {
         auditId: resolvedAuditId,
         redirectUrl: redirect_url,
       });
+
+      // Persist checkout attempt for idempotency and concurrency protection
+      if (typeof storage.saveCheckoutAttempt === 'function') {
+        const now = new Date().toISOString();
+        await storage.saveCheckoutAttempt({
+          id: `att_${crypto.randomUUID()}`,
+          user_id: user.id,
+          finding_id,
+          audit_id: resolvedAuditId,
+          product: 'FIX_PACKAGE',
+          checkout_id: result.checkoutId,
+          checkout_url: result.checkoutUrl,
+          status: 'PENDING',
+          created_at: now,
+          updated_at: now,
+        });
+      }
 
       res.json({
         success: true,
@@ -765,6 +816,13 @@ export function createApiRouter(): Router {
         res.status(503).json({
           error: 'BILLING_NOT_CONFIGURED',
           message: 'Fix Package checkout is not currently available.',
+        });
+        return;
+      }
+      if (msg === 'VARIANT_COLLISION') {
+        res.status(500).json({
+          error: 'CONFIGURATION_ERROR',
+          message: 'Fix Package variant must not match Outcome Fee variant.',
         });
         return;
       }
@@ -975,6 +1033,14 @@ export function createApiRouter(): Router {
         return;
       }
 
+      if (obligation.status === 'REFUNDED') {
+        res.status(409).json({
+          error: 'ALREADY_REFUNDED',
+          message: 'This Outcome Fee obligation has been refunded.',
+        });
+        return;
+      }
+
       if (obligation.fee_amount_usd <= 0) {
         res.status(400).json({
           error: 'INVALID_FEE_AMOUNT',
@@ -983,11 +1049,45 @@ export function createApiRouter(): Router {
         return;
       }
 
+      // Reuse existing open checkout if obligation already has active checkout URL
+      if (obligation.status === 'CHECKOUT_CREATED' && obligation.checkout_url) {
+        res.json({
+          success: true,
+          checkout_url: obligation.checkout_url,
+          obligation,
+          reused_existing: true,
+        });
+        return;
+      }
+
+      // Check active checkout attempt
+      if (typeof storage.getActiveCheckoutAttempt === 'function') {
+        const activeAttempt = await storage.getActiveCheckoutAttempt(user.id, findingId, 'OUTCOME_FEE', resolvedAuditId);
+        if (activeAttempt && activeAttempt.checkout_url) {
+          res.json({
+            success: true,
+            checkout_url: activeAttempt.checkout_url,
+            obligation,
+            reused_existing: true,
+          });
+          return;
+        }
+      }
+
       const config = getLemonSqueezyConfig();
-      if (!config.apiKey || !config.storeId || !config.outcomeFeeVariantId) {
+      // Fail closed: Outcome Fee checkout strictly requires apiKey, storeId, outcomeFeeVariantId, AND webhookSecret
+      if (!config.apiKey || !config.storeId || !config.outcomeFeeVariantId || !config.webhookSecret) {
         res.status(503).json({
           error: 'BILLING_NOT_CONFIGURED',
           message: 'Outcome Fee billing is not currently configured.',
+        });
+        return;
+      }
+
+      if (config.variantId && config.outcomeFeeVariantId === config.variantId) {
+        res.status(500).json({
+          error: 'CONFIGURATION_ERROR',
+          message: 'Outcome Fee variant must not match Fix Package variant.',
         });
         return;
       }
@@ -1004,14 +1104,31 @@ export function createApiRouter(): Router {
       });
 
       // Transition to CHECKOUT_CREATED on checkout creation success
+      // Store checkout_id in its own field without overwriting provider_order_id
       const updatedObligation: OutcomeFeeObligation = {
         ...obligation,
         status: 'CHECKOUT_CREATED',
         checkout_url: checkoutRes.checkoutUrl,
-        provider_order_id: checkoutRes.checkoutId || obligation.provider_order_id,
+        checkout_id: checkoutRes.checkoutId || obligation.checkout_id,
         updated_at: new Date().toISOString(),
       };
       await storage.updateOutcomeFeeObligation(updatedObligation);
+
+      if (typeof storage.saveCheckoutAttempt === 'function') {
+        const now = new Date().toISOString();
+        await storage.saveCheckoutAttempt({
+          id: `att_${crypto.randomUUID()}`,
+          user_id: user.id,
+          finding_id: findingId,
+          audit_id: resolvedAuditId,
+          product: 'OUTCOME_FEE',
+          checkout_id: checkoutRes.checkoutId,
+          checkout_url: checkoutRes.checkoutUrl,
+          status: 'PENDING',
+          created_at: now,
+          updated_at: now,
+        });
+      }
 
       res.json({
         success: true,
@@ -1027,7 +1144,7 @@ export function createApiRouter(): Router {
         });
         return;
       }
-      if (msg === 'OUTCOME_FEE_CANNOT_USE_FIX_PACKAGE_VARIANT') {
+      if (msg === 'OUTCOME_FEE_CANNOT_USE_FIX_PACKAGE_VARIANT' || msg === 'VARIANT_COLLISION') {
         res.status(500).json({
           error: 'CONFIGURATION_ERROR',
           message: 'Outcome Fee variant must not match Fix Package variant.',
@@ -1150,6 +1267,50 @@ export function createApiRouter(): Router {
             return;
           }
 
+          // Validate Currency: USD is mandatory
+          const incomingCurrency = (attributes?.currency || 'USD').toUpperCase();
+          if (incomingCurrency !== 'USD') {
+            storage.releaseWebhookClaim(eventId);
+            res.status(400).json({
+              error: 'CURRENCY_MISMATCH',
+              message: `Fix Package requires USD currency, got ${incomingCurrency}.`,
+            });
+            return;
+          }
+
+          // Validate Actual Paid Amount: exactly $49.00 USD (4900 cents)
+          const rawTotal = attributes?.total;
+          if (rawTotal !== undefined && rawTotal !== null) {
+            const totalInCents = Number(rawTotal) === 49 ? 4900 : Number(rawTotal);
+            if (totalInCents !== 4900) {
+              storage.releaseWebhookClaim(eventId);
+              if (typeof storage.savePaymentReconciliation === 'function') {
+                const now = new Date().toISOString();
+                await storage.savePaymentReconciliation({
+                  id: `rec_${crypto.randomUUID()}`,
+                  primary_order_id: orderId,
+                  duplicate_order_id: orderId,
+                  user_id: userId,
+                  finding_id: findingId,
+                  audit_id: customData?.audit_id ? String(customData.audit_id).trim() : undefined,
+                  product: 'FIX_PACKAGE',
+                  amount_usd: totalInCents / 100,
+                  currency: incomingCurrency,
+                  status: 'NEEDS_REFUND_REVIEW',
+                  reason: 'AMOUNT_MISMATCH',
+                  notes: `Fix Package paid order amount $${(totalInCents / 100).toFixed(2)} does not match required $49.00 USD.`,
+                  created_at: now,
+                  updated_at: now,
+                });
+              }
+              res.status(400).json({
+                error: 'AMOUNT_MISMATCH',
+                message: `Fix Package paid order amount ($${(totalInCents / 100).toFixed(2)}) does not match required $49.00 USD.`,
+              });
+              return;
+            }
+          }
+
           // Handle order_refunded event for Fix Package
           if (eventName === 'order_refunded') {
             // Check for partial refund vs full refund
@@ -1160,7 +1321,28 @@ export function createApiRouter(): Router {
                 Number(attributes?.refunded_amount) > 0 &&
                 Number(attributes?.refunded_amount) < Number(attributes?.total));
 
+            const refundAuditId = customData?.audit_id ? String(customData.audit_id).trim() : undefined;
+
             if (isPartial) {
+              if (typeof storage.savePaymentReconciliation === 'function') {
+                const now = new Date().toISOString();
+                await storage.savePaymentReconciliation({
+                  id: `rec_${crypto.randomUUID()}`,
+                  primary_order_id: orderId,
+                  duplicate_order_id: orderId,
+                  user_id: userId,
+                  finding_id: findingId,
+                  audit_id: refundAuditId,
+                  product: 'FIX_PACKAGE',
+                  amount_usd: Number(attributes?.refunded_amount) / 100,
+                  currency: incomingCurrency,
+                  status: 'NEEDS_REFUND_REVIEW',
+                  reason: 'PARTIAL_REFUND',
+                  notes: 'Partial refund received for Fix Package; flagged for reconciliation.',
+                  created_at: now,
+                  updated_at: now,
+                });
+              }
               await storage.recordProcessedWebhook({
                 event_id: eventId,
                 provider: 'LEMON_SQUEEZY',
@@ -1201,7 +1383,6 @@ export function createApiRouter(): Router {
               return;
             }
 
-            const refundAuditId = customData?.audit_id ? String(customData.audit_id).trim() : undefined;
             const ownerId = await storage.getFindingOwner(findingId, refundAuditId, userId);
             if (!ownerId || ownerId !== userId) {
               storage.releaseWebhookClaim(eventId);
@@ -1397,6 +1578,14 @@ export function createApiRouter(): Router {
             return;
           }
 
+          // Mark active checkout attempt as completed
+          if (typeof storage.getActiveCheckoutAttempt === 'function' && typeof storage.saveCheckoutAttempt === 'function') {
+            const attempt = await storage.getActiveCheckoutAttempt(userId, findingId, 'FIX_PACKAGE', auditId);
+            if (attempt) {
+              await storage.saveCheckoutAttempt({ ...attempt, status: 'COMPLETED', updated_at: new Date().toISOString() });
+            }
+          }
+
           res.status(200).json({
             status: 'SUCCESS',
             entitlement_id: entitlement.id,
@@ -1409,7 +1598,7 @@ export function createApiRouter(): Router {
         // BRANCH B: OUTCOME FEE PAYMENT (Sprint B)
         // ==========================================
         if (product.trim() === 'OUTCOME_FEE') {
-          // 4. Strict Variant Validation
+          // Strict Variant Validation
           const rawVariant = attributes?.first_order_item?.variant_id ?? attributes?.variant_id;
           const incomingVariantId =
             typeof rawVariant === 'string' || typeof rawVariant === 'number'
@@ -1442,6 +1631,17 @@ export function createApiRouter(): Router {
             res.status(400).json({
               error: 'WRONG_VARIANT',
               message: `Variant ID "${incomingVariantId}" does not match configured Outcome Fee variant.`,
+            });
+            return;
+          }
+
+          // Currency validation
+          const incomingCurrency = (attributes?.currency || 'USD').toUpperCase();
+          if (incomingCurrency !== 'USD') {
+            storage.releaseWebhookClaim(eventId);
+            res.status(400).json({
+              error: 'CURRENCY_MISMATCH',
+              message: `Outcome Fee requires USD currency, got ${incomingCurrency}.`,
             });
             return;
           }
@@ -1504,12 +1704,32 @@ export function createApiRouter(): Router {
             return;
           }
 
-          // Amount integrity validation (Section 24 & Invariant 6)
+          // Amount integrity validation against authoritative persisted obligation fee
           const rawTotalCents = attributes?.total ?? (attributes?.first_order_item?.price ?? 0);
           const orderTotalCents = Number(rawTotalCents);
           const expectedCents = Math.round(obligation.fee_amount_usd * 100);
+
           if (Math.abs(orderTotalCents - expectedCents) > 1) {
             storage.releaseWebhookClaim(eventId);
+            if (typeof storage.savePaymentReconciliation === 'function') {
+              const now = new Date().toISOString();
+              await storage.savePaymentReconciliation({
+                id: `rec_${crypto.randomUUID()}`,
+                primary_order_id: orderId,
+                duplicate_order_id: orderId,
+                user_id: userId,
+                finding_id: findingId,
+                audit_id: auditId,
+                product: 'OUTCOME_FEE',
+                amount_usd: orderTotalCents / 100,
+                currency: incomingCurrency,
+                status: 'NEEDS_REFUND_REVIEW',
+                reason: 'AMOUNT_MISMATCH',
+                notes: `Outcome Fee received amount $${(orderTotalCents / 100).toFixed(2)} does not match obligation fee $${obligation.fee_amount_usd.toFixed(2)}.`,
+                created_at: now,
+                updated_at: now,
+              });
+            }
             res.status(400).json({
               error: 'AMOUNT_MISMATCH',
               message: `Reported webhook amount ($${(orderTotalCents / 100).toFixed(2)}) does not match persisted obligation fee ($${obligation.fee_amount_usd.toFixed(2)}).`,
@@ -1517,13 +1737,58 @@ export function createApiRouter(): Router {
             return;
           }
 
+          // Partial refund check
+          if (eventName === 'order_refunded' || orderStatus === 'refunded' || orderStatus === 'partial_refund') {
+            const isPartial =
+              orderStatus === 'partial_refund' ||
+              (attributes?.refunded_amount !== undefined &&
+                attributes?.total !== undefined &&
+                Number(attributes?.refunded_amount) > 0 &&
+                Number(attributes?.refunded_amount) < Number(attributes?.total));
+
+            if (isPartial) {
+              if (typeof storage.savePaymentReconciliation === 'function') {
+                const now = new Date().toISOString();
+                await storage.savePaymentReconciliation({
+                  id: `rec_${crypto.randomUUID()}`,
+                  primary_order_id: orderId,
+                  duplicate_order_id: orderId,
+                  user_id: userId,
+                  finding_id: findingId,
+                  audit_id: auditId,
+                  product: 'OUTCOME_FEE',
+                  amount_usd: Number(attributes?.refunded_amount) / 100,
+                  currency: incomingCurrency,
+                  status: 'NEEDS_REFUND_REVIEW',
+                  reason: 'PARTIAL_REFUND',
+                  notes: 'Partial refund received for Outcome Fee; flagged for reconciliation.',
+                  created_at: now,
+                  updated_at: now,
+                });
+              }
+              await storage.recordProcessedWebhook({
+                event_id: eventId,
+                provider: 'LEMON_SQUEEZY',
+                event_name: eventName,
+                user_id: userId,
+                finding_id: findingId,
+                order_id: orderId,
+                processed_at: new Date().toISOString(),
+              });
+              res.status(200).json({ status: 'IGNORED_PARTIAL_REFUND', order_status: orderStatus });
+              return;
+            }
+          }
+
           // Determine status transition
           let targetStatus: OutcomeFeeStatus = 'PAID';
-          if (eventName === 'order_settled' || orderStatus === 'settled') {
+          if (eventName === 'order_refunded' || orderStatus === 'refunded') {
+            targetStatus = 'REFUNDED';
+          } else if (eventName === 'order_settled' || orderStatus === 'settled') {
             targetStatus = 'SETTLED';
           } else if (orderStatus === 'paid') {
             targetStatus = 'PAID';
-          } else if (orderStatus === 'failed' || orderStatus === 'refunded') {
+          } else if (orderStatus === 'failed') {
             targetStatus = 'FAILED';
           } else {
             // Pending or non-terminal status; record processed and ignore
@@ -1538,10 +1803,15 @@ export function createApiRouter(): Router {
           }
 
           // Monotonic State Machine Invariants:
-          // 1. SETTLED is terminal. Out-of-order order_created or failed events cannot regress SETTLED.
-          // 2. PAID can only transition forward to SETTLED. It cannot regress to FAILED, CHECKOUT_CREATED, or PAYABLE.
+          // 1. REFUNDED is terminal. Late/duplicate order_created or order_settled events cannot revert REFUNDED.
+          // 2. SETTLED can only transition to REFUNDED. It cannot regress to PAID or FAILED.
+          // 3. PAID can only advance to SETTLED or transition to REFUNDED. It cannot regress to FAILED or CHECKOUT_CREATED.
           let newStatus = obligation.status;
-          if (obligation.status === 'SETTLED') {
+          if (obligation.status === 'REFUNDED') {
+            newStatus = 'REFUNDED';
+          } else if (targetStatus === 'REFUNDED') {
+            newStatus = 'REFUNDED';
+          } else if (obligation.status === 'SETTLED') {
             newStatus = 'SETTLED';
           } else if (obligation.status === 'PAID') {
             newStatus = targetStatus === 'SETTLED' ? 'SETTLED' : 'PAID';
@@ -1589,6 +1859,18 @@ export function createApiRouter(): Router {
             return;
           }
 
+          // Mark active checkout attempt as completed or expired
+          if (typeof storage.getActiveCheckoutAttempt === 'function' && typeof storage.saveCheckoutAttempt === 'function') {
+            const attempt = await storage.getActiveCheckoutAttempt(userId, findingId, 'OUTCOME_FEE', auditId);
+            if (attempt) {
+              await storage.saveCheckoutAttempt({
+                ...attempt,
+                status: (newStatus === 'PAID' || newStatus === 'SETTLED') ? 'COMPLETED' : 'EXPIRED',
+                updated_at: new Date().toISOString(),
+              });
+            }
+          }
+
           res.status(200).json({
             status: 'SUCCESS',
             obligation_id: updatedObligation.id,
@@ -1618,6 +1900,78 @@ export function createApiRouter(): Router {
       }
       console.error('[API] Webhook error:', err);
       res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to process webhook.' });
+    }
+  });
+
+  // ==========================================
+  // BILLING READINESS & DIAGNOSTICS ENDPOINTS
+  // ==========================================
+
+  // GET /api/billing/readiness
+  // Dedicated production payment sign-off diagnostics endpoint.
+  // Separates payment readiness from database readiness.
+  // Never returns secrets or API keys.
+  const handleBillingReadiness = async (_req: Request, res: Response): Promise<void> => {
+    try {
+      const storage = getStorage();
+      const dbReady = typeof storage.checkReadiness === 'function'
+        ? await storage.checkReadiness()
+        : false;
+
+      const paymentReport = validateLemonSqueezyPaymentReadiness();
+      const reconciliations = typeof storage.listPaymentReconciliations === 'function'
+        ? await storage.listPaymentReconciliations()
+        : [];
+      const pendingReconciliations = reconciliations.filter(r => r.status === 'NEEDS_REFUND_REVIEW');
+
+      const isLiveSandboxMode = process.env.LEMON_SQUEEZY_SANDBOX === 'true' || process.env.LEMON_SQUEEZY_TEST_MODE === 'true';
+      const isOverallReady = paymentReport.isPaymentReady && dbReady && pendingReconciliations.length === 0;
+
+      res.status(200).json({
+        status: isOverallReady ? 'READY_FOR_HUMAN_REVIEW' : 'NOT_READY',
+        payment_ready: paymentReport.isPaymentReady,
+        database_ready: dbReady,
+        mode: isLiveSandboxMode ? 'SANDBOX' : 'PRODUCTION',
+        checks: {
+          database_connected: dbReady,
+          api_key_configured: paymentReport.apiKeyPresent,
+          store_id_configured: paymentReport.storeIdPresent,
+          fix_package_variant_configured: paymentReport.fixPackageVariantPresent,
+          outcome_fee_variant_configured: paymentReport.outcomeFeeVariantPresent,
+          webhook_secret_configured: paymentReport.webhookSecretPresent,
+          no_variant_collision: !paymentReport.variantCollision,
+          fix_package_ready: paymentReport.isFixPackageReady,
+          outcome_fee_ready: paymentReport.isOutcomeFeeReady,
+        },
+        reconciliation_pending_count: pendingReconciliations.length,
+        missing_fields: paymentReport.missingFields,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error('[API] Billing readiness check failed:', err);
+      res.status(500).json({
+        status: 'ERROR',
+        payment_ready: false,
+        database_ready: false,
+        message: 'Failed to inspect billing readiness.',
+      });
+    }
+  };
+
+  router.get('/billing/readiness', handleBillingReadiness);
+  router.get('/health/billing', handleBillingReadiness);
+
+  // GET /api/billing/reconciliations
+  // Returns payment reconciliation records for audit and human review
+  router.get('/billing/reconciliations', requireAuth, async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const storage = getStorage();
+      const items = typeof storage.listPaymentReconciliations === 'function'
+        ? await storage.listPaymentReconciliations()
+        : [];
+      res.json({ success: true, count: items.length, reconciliations: items });
+    } catch (err) {
+      res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to list reconciliations.' });
     }
   });
 

@@ -9,7 +9,20 @@ import { Client } from '@libsql/client';
 import * as schema from './schema';
 import { verifyDatabaseSchemaPresence } from './index';
 import { IStorage } from '../storage-interface';
-import { User, UserSession, Entitlement, FindingOwnership, ProcessedWebhookEvent, AuthoritativeVerification, OutcomeFeeObligation, OutcomeFeeStatus, PersistedAuditRecord, PersistedFindingRecord } from '../types';
+import {
+  User,
+  UserSession,
+  Entitlement,
+  FindingOwnership,
+  ProcessedWebhookEvent,
+  AuthoritativeVerification,
+  OutcomeFeeObligation,
+  OutcomeFeeStatus,
+  PersistedAuditRecord,
+  PersistedFindingRecord,
+  CheckoutAttempt,
+  PaymentReconciliation,
+} from '../types';
 import { hashSessionToken } from '../auth';
 
 export class DrizzleStorageAdapter implements IStorage {
@@ -31,6 +44,8 @@ export class DrizzleStorageAdapter implements IStorage {
   async clearAll(): Promise<void> {
     this.inFlightWebhooks.clear();
     this.processedWebhooksCache.clear();
+    await this.db.delete(schema.paymentReconciliations);
+    await this.db.delete(schema.checkoutAttempts);
     await this.db.delete(schema.outcomeFeeObligations);
     await this.db.delete(schema.verifications);
     await this.db.delete(schema.webhookEvents);
@@ -690,6 +705,7 @@ export class DrizzleStorageAdapter implements IStorage {
       status: row.status as OutcomeFeeStatus,
       provider: row.provider as 'LEMON_SQUEEZY' | 'DEMO_ADAPTER',
       checkout_url: row.checkoutUrl || undefined,
+      checkout_id: row.checkoutId || undefined,
       provider_order_id: row.providerOrderId || undefined,
       provider_transaction_id: row.providerTransactionId || undefined,
       paid_at: row.paidAt || undefined,
@@ -722,6 +738,7 @@ export class DrizzleStorageAdapter implements IStorage {
         status: obligation.status,
         provider: obligation.provider,
         checkoutUrl: obligation.checkout_url || null,
+        checkoutId: obligation.checkout_id || null,
         providerOrderId: obligation.provider_order_id || null,
         providerTransactionId: obligation.provider_transaction_id || null,
         paidAt: obligation.paid_at || null,
@@ -759,7 +776,6 @@ export class DrizzleStorageAdapter implements IStorage {
 
     if (rows.length === 0) return null;
     if (!auditId && rows.length > 1) {
-      // Ambiguous: fail closed and do not guess latest
       return null;
     }
     return this.mapOutcomeFeeObligation(rows[0]);
@@ -790,6 +806,7 @@ export class DrizzleStorageAdapter implements IStorage {
       .set({
         status: obligation.status,
         checkoutUrl: obligation.checkout_url || null,
+        checkoutId: obligation.checkout_id || null,
         providerOrderId: obligation.provider_order_id || null,
         providerTransactionId: obligation.provider_transaction_id || null,
         paidAt: obligation.paid_at || null,
@@ -816,6 +833,140 @@ export class DrizzleStorageAdapter implements IStorage {
       .limit(1);
 
     return Boolean(rows[0] && (rows[0].status === 'PAID' || rows[0].status === 'SETTLED'));
+  }
+
+  // --- Checkout Attempts Operations ---
+  async saveCheckoutAttempt(attempt: CheckoutAttempt): Promise<CheckoutAttempt> {
+    await this.db
+      .insert(schema.checkoutAttempts)
+      .values({
+        id: attempt.id,
+        userId: attempt.user_id,
+        auditId: attempt.audit_id || null,
+        findingId: attempt.finding_id,
+        product: attempt.product,
+        checkoutUrl: attempt.checkout_url,
+        checkoutId: attempt.checkout_id || null,
+        status: attempt.status,
+        createdAt: attempt.created_at,
+        updatedAt: attempt.updated_at,
+      })
+      .onConflictDoUpdate({
+        target: schema.checkoutAttempts.id,
+        set: {
+          checkoutUrl: attempt.checkout_url,
+          checkoutId: attempt.checkout_id || null,
+          status: attempt.status,
+          updatedAt: attempt.updated_at,
+        },
+      });
+    return attempt;
+  }
+
+  async getActiveCheckoutAttempt(
+    userId: string,
+    findingId: string,
+    product: 'FIX_PACKAGE' | 'OUTCOME_FEE',
+    auditId?: string
+  ): Promise<CheckoutAttempt | null> {
+    const conditions = [
+      eq(schema.checkoutAttempts.userId, userId),
+      eq(schema.checkoutAttempts.findingId, findingId),
+      eq(schema.checkoutAttempts.product, product),
+      eq(schema.checkoutAttempts.status, 'PENDING'),
+    ];
+    if (auditId) {
+      conditions.push(eq(schema.checkoutAttempts.auditId, auditId));
+    }
+
+    const rows = await this.db
+      .select()
+      .from(schema.checkoutAttempts)
+      .where(and(...conditions))
+      .orderBy(desc(schema.checkoutAttempts.createdAt))
+      .limit(1);
+
+    if (!rows[0]) return null;
+
+    const ageMs = Date.now() - new Date(rows[0].createdAt).getTime();
+    if (ageMs > 24 * 60 * 60 * 1000) {
+      await this.db
+        .update(schema.checkoutAttempts)
+        .set({ status: 'EXPIRED', updatedAt: new Date().toISOString() })
+        .where(eq(schema.checkoutAttempts.id, rows[0].id));
+      return null;
+    }
+
+    return {
+      id: rows[0].id,
+      user_id: rows[0].userId,
+      audit_id: rows[0].auditId || undefined,
+      finding_id: rows[0].findingId,
+      product: rows[0].product as any,
+      checkout_url: rows[0].checkoutUrl,
+      checkout_id: rows[0].checkoutId || undefined,
+      status: rows[0].status as any,
+      created_at: rows[0].createdAt,
+      updated_at: rows[0].updatedAt,
+    };
+  }
+
+  // --- Payment Reconciliation Operations ---
+  async savePaymentReconciliation(reconciliation: PaymentReconciliation): Promise<PaymentReconciliation> {
+    await this.db
+      .insert(schema.paymentReconciliations)
+      .values({
+        id: reconciliation.id,
+        userId: reconciliation.user_id,
+        auditId: reconciliation.audit_id || null,
+        findingId: reconciliation.finding_id,
+        product: reconciliation.product,
+        primaryOrderId: reconciliation.primary_order_id,
+        duplicateOrderId: reconciliation.duplicate_order_id,
+        amountUsd: reconciliation.amount_usd,
+        currency: reconciliation.currency,
+        status: reconciliation.status,
+        reason: reconciliation.reason,
+        notes: reconciliation.notes || null,
+        createdAt: reconciliation.created_at,
+        updatedAt: reconciliation.updated_at,
+      })
+      .onConflictDoUpdate({
+        target: schema.paymentReconciliations.id,
+        set: {
+          status: reconciliation.status,
+          notes: reconciliation.notes || null,
+          updatedAt: reconciliation.updated_at,
+        },
+      });
+    return reconciliation;
+  }
+
+  async listPaymentReconciliations(userId?: string, findingId?: string): Promise<PaymentReconciliation[]> {
+    const conditions = [];
+    if (userId) conditions.push(eq(schema.paymentReconciliations.userId, userId));
+    if (findingId) conditions.push(eq(schema.paymentReconciliations.findingId, findingId));
+
+    const rows = conditions.length > 0
+      ? await this.db.select().from(schema.paymentReconciliations).where(and(...conditions)).orderBy(desc(schema.paymentReconciliations.createdAt))
+      : await this.db.select().from(schema.paymentReconciliations).orderBy(desc(schema.paymentReconciliations.createdAt));
+
+    return rows.map((r) => ({
+      id: r.id,
+      user_id: r.userId,
+      audit_id: r.auditId || undefined,
+      finding_id: r.findingId,
+      product: r.product as any,
+      primary_order_id: r.primaryOrderId,
+      duplicate_order_id: r.duplicateOrderId,
+      amount_usd: r.amountUsd,
+      currency: r.currency,
+      status: r.status as any,
+      reason: r.reason as any,
+      notes: r.notes || undefined,
+      created_at: r.createdAt,
+      updated_at: r.updatedAt,
+    }));
   }
 
   // --- Webhook Idempotency Operations ---
@@ -929,6 +1080,33 @@ export class DrizzleStorageAdapter implements IStorage {
           this.processedWebhooksCache.add(params.event.event_id);
           this.inFlightWebhooks.delete(params.event.event_id);
           return { status: 'SUCCESS' };
+        }
+
+        if (
+          existingEntitlementRows[0] &&
+          existingEntitlementRows[0].status === 'ACTIVE' &&
+          existingEntitlementRows[0].providerTransactionId &&
+          existingEntitlementRows[0].providerTransactionId !== params.entitlement.provider_transaction_id
+        ) {
+          // Multiple successful orders for same entitlement:
+          // Insert payment_reconciliations record flagged for refund review.
+          const recId = `rec_${crypto.randomUUID()}`;
+          await tx.insert(schema.paymentReconciliations).values({
+            id: recId,
+            userId: params.entitlement.user_id,
+            auditId: params.entitlement.audit_id || null,
+            findingId: params.entitlement.finding_id,
+            product: 'FIX_PACKAGE',
+            primaryOrderId: existingEntitlementRows[0].providerTransactionId,
+            duplicateOrderId: params.entitlement.provider_transaction_id,
+            amountUsd: params.entitlement.amount_usd,
+            currency: 'USD',
+            status: 'NEEDS_REFUND_REVIEW',
+            reason: 'DUPLICATE_ORDER',
+            notes: 'Duplicate Fix Package payment received; flagged for reconciliation.',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
         }
 
         if (existingEntitlementRows[0]) {
@@ -1046,6 +1224,63 @@ export class DrizzleStorageAdapter implements IStorage {
           .from(schema.entitlements)
           .where(refundQuery)
           .limit(1);
+
+        // Check if this refund is for a duplicate order in paymentReconciliations
+        const duplicateRec = await tx
+          .select()
+          .from(schema.paymentReconciliations)
+          .where(
+            and(
+              eq(schema.paymentReconciliations.duplicateOrderId, params.orderId),
+              eq(schema.paymentReconciliations.userId, params.userId),
+              eq(schema.paymentReconciliations.findingId, params.findingId)
+            )
+          )
+          .limit(1);
+
+        if (duplicateRec[0]) {
+          await tx
+            .update(schema.paymentReconciliations)
+            .set({
+              status: 'REFUNDED',
+              updatedAt: new Date().toISOString(),
+            })
+            .where(eq(schema.paymentReconciliations.id, duplicateRec[0].id));
+
+          await tx
+            .insert(schema.webhookEvents)
+            .values({
+              eventId: params.event.event_id,
+              provider: params.event.provider,
+              eventName: params.event.event_name,
+              userId: params.event.user_id,
+              findingId: params.event.finding_id,
+              orderId: params.event.order_id,
+              processedAt: params.event.processed_at,
+            })
+            .onConflictDoNothing();
+
+          this.processedWebhooksCache.add(params.event.event_id);
+          this.inFlightWebhooks.delete(params.event.event_id);
+
+          const existingEnt = existingEntitlementRows[0];
+          return {
+            status: 'SUCCESS',
+            entitlement: existingEnt ? {
+              id: existingEnt.id,
+              user_id: existingEnt.userId,
+              audit_id: existingEnt.auditId || undefined,
+              finding_id: existingEnt.findingId,
+              type: existingEnt.type as any,
+              status: existingEnt.status as any,
+              provider: existingEnt.provider as any,
+              provider_transaction_id: existingEnt.providerTransactionId,
+              amount_usd: existingEnt.amountUsd,
+              created_at: existingEnt.createdAt,
+              updated_at: existingEnt.updatedAt,
+            } : undefined,
+          };
+        }
 
         if (!existingEntitlementRows[0]) {
           this.inFlightWebhooks.delete(params.event.event_id);
@@ -1255,16 +1490,87 @@ export class DrizzleStorageAdapter implements IStorage {
           processedAt: params.event.processed_at,
         });
 
-        await tx
-          .update(schema.outcomeFeeObligations)
-          .set({
-            status: params.obligation.status,
-            providerOrderId: params.obligation.provider_order_id || null,
-            providerTransactionId: params.obligation.provider_transaction_id || null,
-            paidAt: params.obligation.paid_at || null,
-            updatedAt: params.obligation.updated_at,
-          })
-          .where(eq(schema.outcomeFeeObligations.id, params.obligation.id));
+        const existingObligationRows = await tx
+          .select()
+          .from(schema.outcomeFeeObligations)
+          .where(eq(schema.outcomeFeeObligations.id, params.obligation.id))
+          .limit(1);
+
+        const current = existingObligationRows[0];
+        let resolvedStatus = params.obligation.status;
+
+        if (current) {
+          // Monotonic state machine invariants:
+          // 1. REFUNDED is terminal. Delayed order_created or order_settled must never revert REFUNDED.
+          // 2. SETTLED can only transition forward to REFUNDED. It cannot regress to PAID, CHECKOUT_CREATED, or PAYABLE.
+          // 3. PAID can transition to SETTLED or REFUNDED. It cannot regress to FAILED, CHECKOUT_CREATED, or PAYABLE.
+          if (current.status === 'REFUNDED') {
+            resolvedStatus = 'REFUNDED';
+          } else if (current.status === 'SETTLED' && params.obligation.status !== 'REFUNDED') {
+            resolvedStatus = 'SETTLED';
+          } else if (current.status === 'PAID' && params.obligation.status !== 'SETTLED' && params.obligation.status !== 'REFUNDED') {
+            resolvedStatus = 'PAID';
+          }
+
+          // Duplicate order check on already paid/settled obligation
+          if (
+            (current.status === 'PAID' || current.status === 'SETTLED') &&
+            current.providerOrderId &&
+            params.obligation.provider_order_id &&
+            current.providerOrderId !== params.obligation.provider_order_id
+          ) {
+            const recId = `rec_${crypto.randomUUID()}`;
+            await tx.insert(schema.paymentReconciliations).values({
+              id: recId,
+              userId: params.obligation.user_id,
+              auditId: params.obligation.audit_id || null,
+              findingId: params.obligation.finding_id,
+              product: 'OUTCOME_FEE',
+              primaryOrderId: current.providerOrderId,
+              duplicateOrderId: params.obligation.provider_order_id,
+              amountUsd: params.obligation.fee_amount_usd,
+              currency: params.obligation.currency || 'USD',
+              status: 'NEEDS_REFUND_REVIEW',
+              reason: 'DUPLICATE_ORDER',
+              notes: 'Duplicate Outcome Fee payment received; primary order evidence preserved.',
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            });
+
+            // Do NOT overwrite primary providerOrderId / providerTransactionId
+            await tx
+              .update(schema.outcomeFeeObligations)
+              .set({
+                status: resolvedStatus,
+                updatedAt: params.obligation.updated_at,
+              })
+              .where(eq(schema.outcomeFeeObligations.id, params.obligation.id));
+          } else {
+            await tx
+              .update(schema.outcomeFeeObligations)
+              .set({
+                status: resolvedStatus,
+                checkoutId: params.obligation.checkout_id || current.checkoutId || null,
+                providerOrderId: params.obligation.provider_order_id || current.providerOrderId || null,
+                providerTransactionId: params.obligation.provider_transaction_id || current.providerTransactionId || null,
+                paidAt: params.obligation.paid_at || current.paidAt || null,
+                updatedAt: params.obligation.updated_at,
+              })
+              .where(eq(schema.outcomeFeeObligations.id, params.obligation.id));
+          }
+        } else {
+          await tx
+            .update(schema.outcomeFeeObligations)
+            .set({
+              status: params.obligation.status,
+              checkoutId: params.obligation.checkout_id || null,
+              providerOrderId: params.obligation.provider_order_id || null,
+              providerTransactionId: params.obligation.provider_transaction_id || null,
+              paidAt: params.obligation.paid_at || null,
+              updatedAt: params.obligation.updated_at,
+            })
+            .where(eq(schema.outcomeFeeObligations.id, params.obligation.id));
+        }
 
         if (params.entitlement) {
           const entitlementQuery = params.entitlement.audit_id

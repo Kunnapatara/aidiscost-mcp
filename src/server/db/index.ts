@@ -249,6 +249,7 @@ export async function initializeDatabaseSchema(client: Client): Promise<void> {
         status text NOT NULL,
         provider text DEFAULT 'LEMON_SQUEEZY' NOT NULL,
         checkout_url text,
+        checkout_id text,
         provider_order_id text,
         provider_transaction_id text,
         paid_at text,
@@ -262,6 +263,45 @@ export async function initializeDatabaseSchema(client: Client): Promise<void> {
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_fee_user_audit_finding ON outcome_fee_obligations (user_id, audit_id, finding_id);`,
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_fee_user_finding_null_audit ON outcome_fee_obligations (user_id, finding_id) WHERE audit_id IS NULL;`,
       `CREATE INDEX IF NOT EXISTS idx_outcome_fee_user_id ON outcome_fee_obligations (user_id);`,
+      `CREATE TABLE IF NOT EXISTS checkout_attempts (
+        id text PRIMARY KEY NOT NULL,
+        user_id text NOT NULL,
+        audit_id text,
+        finding_id text NOT NULL,
+        product text NOT NULL,
+        checkout_url text NOT NULL,
+        checkout_id text,
+        status text DEFAULT 'PENDING' NOT NULL,
+        created_at text NOT NULL,
+        updated_at text NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE cascade,
+        FOREIGN KEY (audit_id) REFERENCES audits(id) ON UPDATE no action ON DELETE cascade
+      );`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_checkout_attempts_user_audit_finding_product ON checkout_attempts (user_id, audit_id, finding_id, product);`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_checkout_attempts_user_finding_product_null_audit ON checkout_attempts (user_id, finding_id, product) WHERE audit_id IS NULL;`,
+      `CREATE INDEX IF NOT EXISTS idx_checkout_attempts_finding_id ON checkout_attempts (finding_id);`,
+      `CREATE INDEX IF NOT EXISTS idx_checkout_attempts_user_id ON checkout_attempts (user_id);`,
+      `CREATE TABLE IF NOT EXISTS payment_reconciliations (
+        id text PRIMARY KEY NOT NULL,
+        user_id text NOT NULL,
+        audit_id text,
+        finding_id text NOT NULL,
+        product text NOT NULL,
+        primary_order_id text NOT NULL,
+        duplicate_order_id text NOT NULL,
+        amount_usd real NOT NULL,
+        currency text DEFAULT 'USD' NOT NULL,
+        status text DEFAULT 'NEEDS_REFUND_REVIEW' NOT NULL,
+        reason text NOT NULL,
+        notes text,
+        created_at text NOT NULL,
+        updated_at text NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE cascade,
+        FOREIGN KEY (audit_id) REFERENCES audits(id) ON UPDATE no action ON DELETE cascade
+      );`,
+      `CREATE INDEX IF NOT EXISTS idx_payment_reconciliations_finding_id ON payment_reconciliations (finding_id);`,
+      `CREATE INDEX IF NOT EXISTS idx_payment_reconciliations_user_id ON payment_reconciliations (user_id);`,
+      `CREATE INDEX IF NOT EXISTS idx_payment_reconciliations_status ON payment_reconciliations (status);`,
     ],
     'write'
   );
@@ -355,7 +395,7 @@ export async function initializeDatabaseSchema(client: Client): Promise<void> {
     // Non-fatal
   }
 
-  // Upgrade outcome_fee_obligations schema if missing 'audit_id'
+  // Upgrade outcome_fee_obligations schema if missing 'audit_id' or 'checkout_id'
   try {
     const tableInfo = await client.execute("PRAGMA table_info('outcome_fee_obligations')");
     const cols = (tableInfo.rows || []).map((r: any) => String(r.name || r[1]));
@@ -371,6 +411,9 @@ export async function initializeDatabaseSchema(client: Client): Promise<void> {
         ],
         'write'
       );
+    }
+    if (cols.length > 0 && !cols.includes('checkout_id')) {
+      await client.execute('ALTER TABLE outcome_fee_obligations ADD COLUMN checkout_id text;');
     }
   } catch (err) {
     // Non-fatal

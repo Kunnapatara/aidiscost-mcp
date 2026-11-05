@@ -589,6 +589,14 @@ describe('AIDisCost Sprint B — Outcome Fee Payment Lifecycle & Trust Boundary 
 
     test('Case 21: checkout API failure does NOT mark obligation as PAID', async () => {
       const originalFetch = global.fetch;
+      const currentOb = await storage.getOutcomeFeeObligation(findingA);
+      if (currentOb) {
+        await storage.updateOutcomeFeeObligation({ ...currentOb, status: 'PAYABLE', checkout_url: undefined });
+      }
+      const existingAttempt = await storage.getActiveCheckoutAttempt?.(userA.id, findingA, 'OUTCOME_FEE', currentOb?.audit_id);
+      if (existingAttempt) {
+        await storage.saveCheckoutAttempt?.({ ...existingAttempt, status: 'EXPIRED', updated_at: new Date().toISOString() });
+      }
       try {
         (global as any).fetch = async (url: string, init?: any) => {
           if (typeof url === 'string' && url.includes('api.lemonsqueezy.com/v1/checkouts')) {

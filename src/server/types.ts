@@ -64,7 +64,7 @@ export interface LemonSqueezyConfig {
   isOutcomeFeeConfigured?: boolean;
 }
 
-export type OutcomeFeeStatus = 'PAYABLE' | 'CHECKOUT_CREATED' | 'PAID' | 'SETTLED' | 'FAILED';
+export type OutcomeFeeStatus = 'PAYABLE' | 'CHECKOUT_CREATED' | 'PAID' | 'SETTLED' | 'FAILED' | 'REFUNDED';
 
 export interface OutcomeFeeObligation {
   id: string;
@@ -78,9 +78,40 @@ export interface OutcomeFeeObligation {
   status: OutcomeFeeStatus;
   provider: 'LEMON_SQUEEZY' | 'DEMO_ADAPTER';
   checkout_url?: string;
+  checkout_id?: string;
   provider_order_id?: string;
   provider_transaction_id?: string;
   paid_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CheckoutAttempt {
+  id: string;
+  user_id: string;
+  audit_id?: string;
+  finding_id: string;
+  product: 'FIX_PACKAGE' | 'OUTCOME_FEE';
+  checkout_url: string;
+  checkout_id?: string;
+  status: 'PENDING' | 'COMPLETED' | 'EXPIRED';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PaymentReconciliation {
+  id: string;
+  user_id: string;
+  audit_id?: string;
+  finding_id: string;
+  product: 'FIX_PACKAGE' | 'OUTCOME_FEE';
+  primary_order_id: string;
+  duplicate_order_id: string;
+  amount_usd: number;
+  currency: string;
+  status: 'NEEDS_REFUND_REVIEW' | 'REFUNDED' | 'DISMISSED';
+  reason: 'DUPLICATE_ORDER' | 'AMOUNT_MISMATCH' | 'PARTIAL_REFUND';
+  notes?: string;
   created_at: string;
   updated_at: string;
 }

@@ -68,6 +68,48 @@ export interface CreateCheckoutParams {
 
 export interface CreateCheckoutResult {
   checkoutUrl: string;
+  checkoutId?: string;
+}
+
+export interface PaymentReadinessReport {
+  isPaymentReady: boolean;
+  isFixPackageReady: boolean;
+  isOutcomeFeeReady: boolean;
+  apiKeyPresent: boolean;
+  storeIdPresent: boolean;
+  fixPackageVariantPresent: boolean;
+  outcomeFeeVariantPresent: boolean;
+  webhookSecretPresent: boolean;
+  variantCollision: boolean;
+  missingFields: string[];
+}
+
+export function validateLemonSqueezyPaymentReadiness(configOverride?: Partial<LemonSqueezyConfig>): PaymentReadinessReport {
+  const config = { ...getLemonSqueezyConfig(), ...configOverride };
+  const missingFields: string[] = [];
+  if (!config.apiKey) missingFields.push('LEMON_SQUEEZY_API_KEY');
+  if (!config.storeId) missingFields.push('LEMON_SQUEEZY_STORE_ID');
+  if (!config.variantId) missingFields.push('LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID');
+  if (!config.outcomeFeeVariantId) missingFields.push('LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID');
+  if (!config.webhookSecret) missingFields.push('LEMON_SQUEEZY_WEBHOOK_SECRET');
+
+  const variantCollision = Boolean(config.variantId && config.outcomeFeeVariantId && config.variantId === config.outcomeFeeVariantId);
+  const isFixPackageReady = Boolean(config.apiKey && config.storeId && config.variantId && config.webhookSecret && !variantCollision);
+  const isOutcomeFeeReady = Boolean(config.apiKey && config.storeId && config.outcomeFeeVariantId && config.webhookSecret && !variantCollision);
+  const isPaymentReady = isFixPackageReady && isOutcomeFeeReady;
+
+  return {
+    isPaymentReady,
+    isFixPackageReady,
+    isOutcomeFeeReady,
+    apiKeyPresent: Boolean(config.apiKey),
+    storeIdPresent: Boolean(config.storeId),
+    fixPackageVariantPresent: Boolean(config.variantId),
+    outcomeFeeVariantPresent: Boolean(config.outcomeFeeVariantId),
+    webhookSecretPresent: Boolean(config.webhookSecret),
+    variantCollision,
+    missingFields,
+  };
 }
 
 /**
@@ -80,8 +122,14 @@ export async function createLemonSqueezyCheckout(
 ): Promise<CreateCheckoutResult> {
   const config = { ...getLemonSqueezyConfig(), ...configOverride };
 
-  if (!config.isConfigured && (!config.apiKey || !config.storeId || !config.variantId)) {
+  // Fail-closed: both API credentials and webhook secret are strictly required
+  if (!config.apiKey || !config.storeId || !config.variantId || !config.webhookSecret) {
     throw new Error('BILLING_NOT_CONFIGURED');
+  }
+
+  // Variant collision protection: Fix Package variant cannot match Outcome Fee variant
+  if (config.outcomeFeeVariantId && config.variantId === config.outcomeFeeVariantId) {
+    throw new Error('VARIANT_COLLISION');
   }
 
   const payload = {
@@ -135,11 +183,12 @@ export async function createLemonSqueezyCheckout(
 
   const json: any = await response.json();
   const url = json?.data?.attributes?.url;
+  const checkoutId = json?.data?.id ? String(json.data.id) : undefined;
   if (!url) {
     throw new Error('Lemon Squeezy did not return a valid checkout URL');
   }
 
-  return { checkoutUrl: url };
+  return { checkoutUrl: url, checkoutId };
 }
 
 export interface CreateOutcomeFeeCheckoutParams {
@@ -170,7 +219,8 @@ export async function createLemonSqueezyOutcomeFeeCheckout(
   const config = { ...getLemonSqueezyConfig(), ...configOverride };
 
   const variantIdToUse = config.outcomeFeeVariantId;
-  if (!config.apiKey || !config.storeId || !variantIdToUse) {
+  // Fail-closed: Outcome Fee requires apiKey, storeId, outcomeFeeVariantId, and webhookSecret
+  if (!config.apiKey || !config.storeId || !variantIdToUse || !config.webhookSecret) {
     throw new Error('OUTCOME_FEE_BILLING_NOT_CONFIGURED');
   }
 

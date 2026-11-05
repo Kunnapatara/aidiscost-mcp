@@ -5,7 +5,19 @@
 
 import fs from 'fs';
 import path from 'path';
-import { User, UserSession, Entitlement, FindingOwnership, ProcessedWebhookEvent, AuthoritativeVerification, OutcomeFeeObligation, PersistedAuditRecord, PersistedFindingRecord } from './types';
+import {
+  User,
+  UserSession,
+  Entitlement,
+  FindingOwnership,
+  ProcessedWebhookEvent,
+  AuthoritativeVerification,
+  OutcomeFeeObligation,
+  PersistedAuditRecord,
+  PersistedFindingRecord,
+  CheckoutAttempt,
+  PaymentReconciliation,
+} from './types';
 import { IStorage } from './storage-interface';
 import { createDatabaseConnection } from './db/index';
 import { DrizzleStorageAdapter } from './db/adapter';
@@ -25,6 +37,8 @@ interface StoreSchema {
   outcomeFeeObligationsById: Record<string, string>; // obligation_id -> finding_id
   audits: Record<string, PersistedAuditRecord>; // audit_id -> PersistedAuditRecord
   findings: Record<string, PersistedFindingRecord>; // `${audit_id}:${finding_id}` -> PersistedFindingRecord
+  checkoutAttempts: Record<string, CheckoutAttempt>; // `${userId}:${auditId || ''}:${findingId}:${product}` -> CheckoutAttempt
+  paymentReconciliations: Record<string, PaymentReconciliation>; // id -> PaymentReconciliation
 }
 
 export class ServerStorage implements IStorage {
@@ -49,6 +63,8 @@ export class ServerStorage implements IStorage {
       outcomeFeeObligationsById: {},
       audits: {},
       findings: {},
+      checkoutAttempts: {},
+      paymentReconciliations: {},
     };
     this.loadFromDisk();
   }
@@ -77,6 +93,8 @@ export class ServerStorage implements IStorage {
           outcomeFeeObligationsById: parsed.outcomeFeeObligationsById || {},
           audits: parsed.audits || {},
           findings: parsed.findings || {},
+          checkoutAttempts: parsed.checkoutAttempts || {},
+          paymentReconciliations: parsed.paymentReconciliations || {},
         };
 
         // Safely reconcile legacy records with NULL audit_id ONLY when exactly 1 distinct audit exists
@@ -177,6 +195,8 @@ export class ServerStorage implements IStorage {
       outcomeFeeObligationsById: {},
       audits: {},
       findings: {},
+      checkoutAttempts: {},
+      paymentReconciliations: {},
     };
     this.flushToDisk();
   }
@@ -648,6 +668,47 @@ export class ServerStorage implements IStorage {
     this.flushToDisk();
   }
 
+  // --- Checkout Attempts Operations ---
+  async saveCheckoutAttempt(attempt: CheckoutAttempt): Promise<CheckoutAttempt> {
+    const key = `${attempt.user_id}:${attempt.audit_id || ''}:${attempt.finding_id}:${attempt.product}`;
+    this.data.checkoutAttempts[key] = attempt;
+    this.flushToDisk();
+    return attempt;
+  }
+
+  async getActiveCheckoutAttempt(
+    userId: string,
+    findingId: string,
+    product: 'FIX_PACKAGE' | 'OUTCOME_FEE',
+    auditId?: string
+  ): Promise<CheckoutAttempt | null> {
+    const key = `${userId}:${auditId || ''}:${findingId}:${product}`;
+    const attempt = this.data.checkoutAttempts[key];
+    if (!attempt || attempt.status !== 'PENDING') return null;
+    const ageMs = Date.now() - new Date(attempt.created_at).getTime();
+    if (ageMs > 24 * 60 * 60 * 1000) {
+      attempt.status = 'EXPIRED';
+      this.flushToDisk();
+      return null;
+    }
+    return attempt;
+  }
+
+  // --- Payment Reconciliation Operations ---
+  async savePaymentReconciliation(reconciliation: PaymentReconciliation): Promise<PaymentReconciliation> {
+    this.data.paymentReconciliations[reconciliation.id] = reconciliation;
+    this.flushToDisk();
+    return reconciliation;
+  }
+
+  async listPaymentReconciliations(userId?: string, findingId?: string): Promise<PaymentReconciliation[]> {
+    return Object.values(this.data.paymentReconciliations).filter((r) => {
+      if (userId && r.user_id !== userId) return false;
+      if (findingId && r.finding_id !== findingId) return false;
+      return true;
+    });
+  }
+
   async processOrderCreatedWebhookTransaction(params: {
     event: ProcessedWebhookEvent;
     entitlement: Entitlement;
@@ -673,6 +734,35 @@ export class ServerStorage implements IStorage {
       this.flushToDisk();
       return { status: 'SUCCESS' };
     }
+
+    // Multiple successful orders for same entitlement:
+    // If active entitlement already exists with a DIFFERENT transaction ID, do NOT overwrite it!
+    if (
+      existing &&
+      existing.status === 'ACTIVE' &&
+      existing.provider_transaction_id &&
+      existing.provider_transaction_id !== params.entitlement.provider_transaction_id
+    ) {
+      const recId = `rec_${crypto.randomUUID()}`;
+      const reconciliation: PaymentReconciliation = {
+        id: recId,
+        user_id: params.entitlement.user_id,
+        audit_id: params.entitlement.audit_id,
+        finding_id: params.entitlement.finding_id,
+        product: 'FIX_PACKAGE',
+        primary_order_id: existing.provider_transaction_id,
+        duplicate_order_id: params.entitlement.provider_transaction_id,
+        amount_usd: params.entitlement.amount_usd,
+        currency: 'USD',
+        status: 'NEEDS_REFUND_REVIEW',
+        reason: 'DUPLICATE_ORDER',
+        notes: 'Duplicate Fix Package payment received; flagged for reconciliation.',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      this.data.paymentReconciliations[recId] = reconciliation;
+    }
+
     this.data.entitlements[key] = params.entitlement;
     if (!params.entitlement.audit_id) {
       this.data.entitlements[this.entitlementKey(params.entitlement.user_id, params.entitlement.finding_id)] = params.entitlement;
@@ -705,6 +795,24 @@ export class ServerStorage implements IStorage {
           e.provider_transaction_id === params.orderId
       );
     }
+
+    // Check if this refund is for a duplicate order in paymentReconciliations
+    const duplicateRec = Object.values(this.data.paymentReconciliations).find(
+      (r) =>
+        r.user_id === params.userId &&
+        r.finding_id === params.findingId &&
+        r.duplicate_order_id === params.orderId
+    );
+
+    if (duplicateRec) {
+      duplicateRec.status = 'REFUNDED';
+      duplicateRec.updated_at = new Date().toISOString();
+      this.data.processedWebhooks[params.event.event_id] = params.event;
+      this.inFlightWebhooks.delete(params.event.event_id);
+      this.flushToDisk();
+      return { status: 'SUCCESS', entitlement: existing };
+    }
+
     if (!existing) {
       this.inFlightWebhooks.delete(params.event.event_id);
       return { status: 'NOT_FOUND' };
@@ -754,9 +862,55 @@ export class ServerStorage implements IStorage {
       return { status: 'DUPLICATE' };
     }
     const key = this.outcomeFeeCompositeKey(params.obligation.user_id, params.obligation.finding_id, params.obligation.audit_id);
-    this.data.outcomeFeeObligations[key] = params.obligation;
-    this.data.outcomeFeeObligationsById[params.obligation.id] = key;
-    this.data.outcomeFeeObligations[params.obligation.finding_id] = params.obligation;
+    const existing = this.data.outcomeFeeObligations[key] || this.data.outcomeFeeObligations[params.obligation.finding_id];
+
+    let resolvedObligation = { ...params.obligation };
+
+    if (existing) {
+      // Monotonic status transitions:
+      // REFUNDED is terminal. Delayed order_created or order_settled cannot revert REFUNDED.
+      if (existing.status === 'REFUNDED') {
+        resolvedObligation.status = 'REFUNDED';
+      } else if (existing.status === 'SETTLED' && params.obligation.status !== 'REFUNDED') {
+        resolvedObligation.status = 'SETTLED';
+      } else if (existing.status === 'PAID' && params.obligation.status !== 'SETTLED' && params.obligation.status !== 'REFUNDED') {
+        resolvedObligation.status = 'PAID';
+      }
+
+      // Check if duplicate order arrived for already paid/settled obligation
+      if (
+        (existing.status === 'PAID' || existing.status === 'SETTLED') &&
+        existing.provider_order_id &&
+        params.obligation.provider_order_id &&
+        existing.provider_order_id !== params.obligation.provider_order_id
+      ) {
+        const recId = `rec_${crypto.randomUUID()}`;
+        const reconciliation: PaymentReconciliation = {
+          id: recId,
+          user_id: params.obligation.user_id,
+          audit_id: params.obligation.audit_id,
+          finding_id: params.obligation.finding_id,
+          product: 'OUTCOME_FEE',
+          primary_order_id: existing.provider_order_id,
+          duplicate_order_id: params.obligation.provider_order_id,
+          amount_usd: params.obligation.fee_amount_usd,
+          currency: params.obligation.currency || 'USD',
+          status: 'NEEDS_REFUND_REVIEW',
+          reason: 'DUPLICATE_ORDER',
+          notes: 'Duplicate Outcome Fee payment received; primary order evidence preserved.',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        this.data.paymentReconciliations[recId] = reconciliation;
+        // Do NOT overwrite primary provider_order_id or provider_transaction_id
+        resolvedObligation.provider_order_id = existing.provider_order_id;
+        resolvedObligation.provider_transaction_id = existing.provider_transaction_id;
+      }
+    }
+
+    this.data.outcomeFeeObligations[key] = resolvedObligation;
+    this.data.outcomeFeeObligationsById[resolvedObligation.id] = key;
+    this.data.outcomeFeeObligations[resolvedObligation.finding_id] = resolvedObligation;
     if (params.entitlement) {
       const entKey = this.entitlementKey(params.entitlement.user_id, params.entitlement.finding_id, params.entitlement.audit_id);
       this.data.entitlements[entKey] = params.entitlement;
