@@ -25,7 +25,39 @@ describe('AIDisCost MCP — Area 6 Remote Turso Migration Guard & Safety Tests',
     assert.strictEqual(res.status, 'BLOCKED');
   });
 
-  test('2. Local file: URL is rejected from claiming Remote Turso verification', async () => {
+  test('2. Generic TURSO_DATABASE_URL is rejected from acting as remote test database', async () => {
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_DATABASE_URL: 'libsql://primary-production-db.turso.io',
+      TURSO_AUTH_TOKEN: 'prod_token',
+      TURSO_TEST_DATABASE_URL: '', // Missing dedicated test URL
+    };
+    const validation = validateTursoTestConfig(env);
+    assert.strictEqual(validation.valid, false);
+    assert.strictEqual(validation.blocked, true);
+    assert.ok(validation.reason?.includes('Generic TURSO_DATABASE_URL cannot be used'));
+
+    const res = await runRemoteTursoMigrationTest(env);
+    assert.strictEqual(res.status, 'BLOCKED');
+  });
+
+  test('3. TURSO_TEST_DATABASE_URL colliding with primary TURSO_DATABASE_URL is rejected with FAIL', async () => {
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_DATABASE_URL: 'libsql://aidiscost-test-shared.turso.io',
+      TURSO_TEST_DATABASE_URL: 'libsql://aidiscost-test-shared.turso.io', // Collision!
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const validation = validateTursoTestConfig(env);
+    assert.strictEqual(validation.valid, false);
+    assert.strictEqual(validation.blocked, false);
+    assert.ok(validation.reason?.includes('DATABASE ISOLATION VIOLATION'));
+
+    const res = await runRemoteTursoMigrationTest(env);
+    assert.strictEqual(res.status, 'FAIL');
+  });
+
+  test('4. Local file: URL is rejected from claiming Remote Turso verification', async () => {
     const env: NodeJS.ProcessEnv = {
       NODE_ENV: 'test',
       TURSO_TEST_DATABASE_URL: 'file:data/test.db',
@@ -40,7 +72,7 @@ describe('AIDisCost MCP — Area 6 Remote Turso Migration Guard & Safety Tests',
     assert.strictEqual(res.status, 'BLOCKED');
   });
 
-  test('3. NODE_ENV=production strictly halts migration runner', async () => {
+  test('5. NODE_ENV=production strictly halts migration runner with FAIL', async () => {
     const env: NodeJS.ProcessEnv = {
       NODE_ENV: 'production',
       TURSO_TEST_DATABASE_URL: 'libsql://aidiscost-test.turso.io',
@@ -54,7 +86,7 @@ describe('AIDisCost MCP — Area 6 Remote Turso Migration Guard & Safety Tests',
     assert.strictEqual(res.status, 'FAIL');
   });
 
-  test('4. Production URL patterns (e.g. aidiscost-prod.turso.io) are rejected for safety', async () => {
+  test('6. Production URL patterns (e.g. aidiscost-prod-db.turso.io) are rejected for safety with FAIL', async () => {
     const env: NodeJS.ProcessEnv = {
       NODE_ENV: 'test',
       TURSO_TEST_DATABASE_URL: 'libsql://aidiscost-prod-db.turso.io',
@@ -62,10 +94,13 @@ describe('AIDisCost MCP — Area 6 Remote Turso Migration Guard & Safety Tests',
     };
     const validation = validateTursoTestConfig(env);
     assert.strictEqual(validation.valid, false);
-    assert.ok(validation.reason?.includes('PRODUCTION TARGET DETECTED'));
+    assert.ok(validation.reason?.includes('POTENTIAL PRODUCTION TARGET DETECTED'));
+
+    const res = await runRemoteTursoMigrationTest(env);
+    assert.strictEqual(res.status, 'FAIL');
   });
 
-  test('5. Non-test URL without explicit confirmation is rejected', async () => {
+  test('7. Non-test URL without approved test indicator is rejected with FAIL', async () => {
     const env: NodeJS.ProcessEnv = {
       NODE_ENV: 'test',
       TURSO_TEST_DATABASE_URL: 'libsql://customer-financial-data.turso.io',
@@ -74,11 +109,15 @@ describe('AIDisCost MCP — Area 6 Remote Turso Migration Guard & Safety Tests',
     const validation = validateTursoTestConfig(env);
     assert.strictEqual(validation.valid, false);
     assert.ok(validation.reason?.includes('UNVERIFIED DATABASE TARGET'));
+
+    const res = await runRemoteTursoMigrationTest(env);
+    assert.strictEqual(res.status, 'FAIL');
   });
 
-  test('6. Valid test database URL is approved for execution', async () => {
+  test('8. Valid isolated test database URL is approved for execution', async () => {
     const env: NodeJS.ProcessEnv = {
       NODE_ENV: 'test',
+      TURSO_DATABASE_URL: 'libsql://aidiscost-primary.turso.io',
       TURSO_TEST_DATABASE_URL: 'libsql://aidiscost-disposable-test-db.turso.io',
       TURSO_TEST_AUTH_TOKEN: 'test_token_valid',
     };

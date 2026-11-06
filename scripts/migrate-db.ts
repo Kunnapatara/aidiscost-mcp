@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'fs';
 import path from 'path';
 import { migrate } from 'drizzle-orm/libsql/migrator';
 import { createDatabaseConnection } from '../src/server/db/index';
@@ -27,6 +28,16 @@ export async function runDatabaseMigrations(): Promise<void> {
     throw new Error(
       '[FATAL MIGRATION ERROR] In production with a remote Turso database, TURSO_AUTH_TOKEN is required to run migrations.'
     );
+  }
+
+  // Ensure parent directory exists for local file SQLite databases to prevent SQLITE_CANTOPEN (error 14)
+  if (url && url.startsWith('file:')) {
+    const rawPath = url.slice('file:'.length);
+    const resolvedPath = path.resolve(process.cwd(), rawPath);
+    const parentDir = path.dirname(resolvedPath);
+    if (!fs.existsSync(parentDir)) {
+      fs.mkdirSync(parentDir, { recursive: true });
+    }
   }
 
   console.log('[DB Migrate] Connecting to database...');

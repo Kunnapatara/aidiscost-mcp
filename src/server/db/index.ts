@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'fs';
+import path from 'path';
 import { createClient, Client } from '@libsql/client';
 import { drizzle, LibSQLDatabase } from 'drizzle-orm/libsql';
 import * as schema from './schema';
@@ -54,6 +56,16 @@ export function createDatabaseConnection(config?: DatabaseConfig): DatabaseInsta
     throw new Error(
       '[FATAL PRODUCTION CONFIGURATION ERROR] In production with a remote Turso database, TURSO_AUTH_TOKEN is required.'
     );
+  }
+
+  // Ensure parent directory exists for local file databases to prevent SQLITE_CANTOPEN (error 14)
+  if (resolvedUrl.startsWith('file:')) {
+    const rawPath = resolvedUrl.slice('file:'.length);
+    const resolvedPath = path.resolve(process.cwd(), rawPath);
+    const parentDir = path.dirname(resolvedPath);
+    if (!fs.existsSync(parentDir)) {
+      fs.mkdirSync(parentDir, { recursive: true });
+    }
   }
 
   const client = createClient({

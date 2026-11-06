@@ -44,78 +44,96 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
     };
   }
 
-  const url = (env.TURSO_TEST_DATABASE_URL || env.TURSO_DATABASE_URL || '').trim();
-  const authToken = (env.TURSO_TEST_AUTH_TOKEN || env.TURSO_AUTH_TOKEN || '').trim();
+  const testUrl = (env.TURSO_TEST_DATABASE_URL || '').trim();
+  const testAuthToken = (env.TURSO_TEST_AUTH_TOKEN || '').trim();
+  const primaryUrl = (env.TURSO_DATABASE_URL || '').trim();
 
-  if (!url) {
+  // Strict requirement: Dedicated test credentials (no fallback to generic production variables)
+  if (!testUrl) {
+    if (primaryUrl) {
+      return {
+        valid: false,
+        blocked: true,
+        reason: 'Generic TURSO_DATABASE_URL cannot be used for remote migration tests. Dedicated TURSO_TEST_DATABASE_URL is strictly required to prevent accidental production modifications.',
+      };
+    }
     return {
       valid: false,
       blocked: true,
-      reason: 'TURSO_TEST_DATABASE_URL (or TURSO_DATABASE_URL) is not configured in the environment.',
+      reason: 'TURSO_TEST_DATABASE_URL is not configured in the environment. Dedicated remote test database credentials are required.',
     };
   }
 
   // File URLs are local SQLite, not remote Turso
-  if (url.startsWith('file:') || url === ':memory:') {
+  if (testUrl.startsWith('file:') || testUrl === ':memory:') {
     return {
       valid: false,
       blocked: true,
-      reason: `Local database URL "${url}" detected. Remote Turso verification requires a live remote endpoint starting with libsql:// or https://.`,
+      reason: `Local database URL "${testUrl}" detected. Remote Turso verification requires a live remote endpoint starting with libsql:// or https://.`,
     };
   }
 
-  if (!url.startsWith('libsql://') && !url.startsWith('https://')) {
+  if (!testUrl.startsWith('libsql://') && !testUrl.startsWith('https://')) {
     return {
       valid: false,
       blocked: true,
-      reason: `Invalid database protocol in "${url}". Remote Turso URLs must start with libsql:// or https://.`,
+      reason: `Invalid database protocol in "${testUrl}". Remote Turso URLs must start with libsql:// or https://.`,
     };
   }
 
-  if (!authToken) {
+  if (!testAuthToken) {
     return {
       valid: false,
       blocked: true,
-      reason: 'TURSO_AUTH_TOKEN (or TURSO_TEST_AUTH_TOKEN) is required for remote Turso access.',
+      reason: 'Dedicated TURSO_TEST_AUTH_TOKEN is required for remote Turso test access.',
     };
   }
 
-  // Safety preflight: target database must be identifiable as a test database
-  const lowerUrl = url.toLowerCase();
+  // Database isolation boundary: test database URL must never collide with primary database URL
+  if (primaryUrl && testUrl === primaryUrl) {
+    return {
+      valid: false,
+      blocked: false,
+      reason: 'DATABASE ISOLATION VIOLATION: TURSO_TEST_DATABASE_URL is identical to TURSO_DATABASE_URL. Remote migration tests must target an isolated test database.',
+    };
+  }
+
+  // Safety preflight: target database must be identifiable as an isolated disposable test database
+  const lowerUrl = testUrl.toLowerCase();
+  const hasProdIndicator =
+    lowerUrl.includes('prod') ||
+    lowerUrl.includes('production') ||
+    lowerUrl.includes('live') ||
+    lowerUrl.includes('-main');
+
+  if (hasProdIndicator) {
+    return {
+      valid: false,
+      blocked: false,
+      reason: `POTENTIAL PRODUCTION TARGET DETECTED: Database URL "${testUrl}" matches production naming patterns. Verification aborted for safety.`,
+    };
+  }
+
   const hasTestIndicator =
     lowerUrl.includes('test') ||
     lowerUrl.includes('dev') ||
     lowerUrl.includes('sandbox') ||
     lowerUrl.includes('temp') ||
-    lowerUrl.includes('disposable') ||
-    env.TURSO_ALLOW_TEST_MIGRATIONS === 'true';
-
-  const hasProdIndicator =
-    lowerUrl.includes('prod') ||
-    lowerUrl.includes('production') ||
-    lowerUrl.includes('live');
-
-  if (hasProdIndicator && env.TURSO_ALLOW_TEST_MIGRATIONS !== 'true') {
-    return {
-      valid: false,
-      blocked: false,
-      reason: `POTENTIAL PRODUCTION TARGET DETECTED: Database URL "${url}" matches production naming patterns. Verification aborted for safety.`,
-    };
-  }
+    lowerUrl.includes('disposable');
 
   if (!hasTestIndicator) {
     return {
       valid: false,
       blocked: false,
-      reason: `UNVERIFIED DATABASE TARGET: Database URL "${url}" does not contain test/dev indicator. Set TURSO_ALLOW_TEST_MIGRATIONS=true if you have verified this database is disposable.`,
+      reason: `UNVERIFIED DATABASE TARGET: Database URL "${testUrl}" does not contain an approved test indicator (test, dev, sandbox, temp, disposable).`,
     };
   }
 
   return {
     valid: true,
     blocked: false,
-    url,
-    authToken,
+    url: testUrl,
+    authToken: testAuthToken,
   };
 }
 

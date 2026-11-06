@@ -1,146 +1,41 @@
 {
-  "overall_status": "PASS",
-  "run_id": "sb_run_d77ffb49-4022-4251-bcaf-bdd90f25597b",
-  "commit_sha": "414572fd5fb2ced5747f950b13efb1596ac0c450",
-  "environment": "test",
-  "sandbox_mode": true,
-  "started_at": "2026-11-05T12:19:11.648Z",
-  "completed_at": "2026-11-05T12:19:12.935Z",
+  "overall_status": "BLOCKED",
+  "run_id": "sb_run_7188a71c-d06e-448a-9c89-2bd8eecd5446",
+  "commit_sha": "UNKNOWN",
+  "commit_provenance_verified": false,
+  "environment": "development",
+  "sandbox_mode": false,
+  "started_at": "2026-11-06T11:53:18.497Z",
+  "completed_at": "2026-11-06T11:53:18.507Z",
   "steps": [
     {
       "step_number": 1,
       "name": "Validate Configuration & Environment",
       "category": "CONFIG_VALIDATION",
-      "status": "PASS",
+      "evidence_source": "CONFIG_VALIDATION",
+      "status": "BLOCKED",
       "duration_ms": 0,
-      "details": "All required configuration variables present",
-      "assertions_passed": 1,
-      "assertions_failed": 0
-    },
-    {
-      "step_number": 2,
-      "name": "Enforce Sandbox Proof & Anti-Live Fallback",
-      "category": "CONFIG_VALIDATION",
-      "status": "PASS",
-      "duration_ms": 0,
-      "details": "Sandbox Mode strictly verified; zero fallback to live API credentials",
-      "assertions_passed": 2,
-      "assertions_failed": 0
-    },
-    {
-      "step_number": 3,
-      "name": "Verify Distinct Variant IDs",
-      "category": "CONFIG_VALIDATION",
-      "status": "PASS",
-      "duration_ms": 0,
-      "details": "Fix Variant: var_fix_99, Outcome Fee Variant: var_fee_88",
-      "assertions_passed": 1,
-      "assertions_failed": 0
-    },
-    {
-      "step_number": 4,
-      "name": "Create Real Lemon Squeezy Sandbox Fix Package Checkout",
-      "category": "PROVIDER_API",
-      "status": "PASS",
-      "duration_ms": 55,
-      "details": "Created Checkout ID: chk_sb_mock_123",
-      "assertions_passed": 2,
-      "assertions_failed": 0,
-      "provider_request_id": "req_mock_999"
-    },
-    {
-      "step_number": 5,
-      "name": "Verify Checkout Data & Storage Persistence",
-      "category": "DATABASE_ASSERTION",
-      "status": "PASS",
-      "duration_ms": 1,
-      "details": "Persisted checkout chk_sb_mock_123 to storage",
-      "assertions_passed": 1,
-      "assertions_failed": 0
-    },
-    {
-      "step_number": 6,
-      "name": "HTTP Webhook: order_created ($49.00 USD)",
-      "category": "HTTP_WEBHOOK",
-      "status": "PASS",
-      "duration_ms": 59,
-      "details": "Successfully delivered signed order_created event to application HTTP endpoint",
-      "assertions_passed": 1,
-      "assertions_failed": 0
-    },
-    {
-      "step_number": 7,
-      "name": "Verify Entitlement State in Storage",
-      "category": "DATABASE_ASSERTION",
-      "status": "PASS",
-      "duration_ms": 0,
-      "details": "Entitlement ent_d2f48d82-2cf6-4e94-82c4-05d3a823d76b is ACTIVE for finding fnd_sb_eca0e279-cc46-4e98-9347-08755d9489f6",
-      "assertions_passed": 2,
-      "assertions_failed": 0
-    },
-    {
-      "step_number": 8,
-      "name": "HTTP Webhook: order_settled Transition",
-      "category": "HTTP_WEBHOOK",
-      "status": "PASS",
-      "duration_ms": 7,
-      "details": "order_settled handled idempotently; entitlement remains ACTIVE",
-      "assertions_passed": 2,
-      "assertions_failed": 0
-    },
-    {
-      "step_number": 9,
-      "name": "Outcome Fee Obligation & Webhook Lifecycle",
-      "category": "HTTP_WEBHOOK",
-      "status": "PASS",
-      "duration_ms": 7,
-      "details": "Obligation transitioned to PAID upon exact $1,000.00 payment confirmation",
-      "assertions_passed": 2,
-      "assertions_failed": 0
-    },
-    {
-      "step_number": 10,
-      "name": "Idempotency, Underpayment & Currency Verification",
-      "category": "HTTP_WEBHOOK",
-      "status": "PASS",
-      "duration_ms": 13,
-      "details": "Duplicate events deduplicated; underpayment ($10.00) and currency mismatch (EUR) strictly rejected",
-      "assertions_passed": 3,
-      "assertions_failed": 0
-    },
-    {
-      "step_number": 11,
-      "name": "Refunds, Reconciliation & Monotonic Non-Regression",
-      "category": "HTTP_WEBHOOK",
-      "status": "PASS",
-      "duration_ms": 7,
-      "details": "Full refund revokes entitlement; monotonic guard prohibits late re-activation",
-      "assertions_passed": 3,
-      "assertions_failed": 0
+      "details": "Missing required environment variables: LEMON_SQUEEZY_SANDBOX_API_KEY, LEMON_SQUEEZY_STORE_ID, LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID, LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID, LEMON_SQUEEZY_WEBHOOK_SECRET",
+      "assertions_passed": 0,
+      "assertions_failed": 1
     }
   ],
   "step_status": {
-    "step_1": "PASS",
-    "step_2": "PASS",
-    "step_3": "PASS",
-    "step_4": "PASS",
-    "step_5": "PASS",
-    "step_6": "PASS",
-    "step_7": "PASS",
-    "step_8": "PASS",
-    "step_9": "PASS",
-    "step_10": "PASS",
-    "step_11": "PASS"
+    "step_1": "BLOCKED"
+  },
+  "evidence_summary": {
+    "provider_originated_events_verified": false,
+    "locally_simulated_events_count": 0,
+    "api_response_verified": false,
+    "database_verified_count": 0
   },
   "assertions": {
-    "total": 20,
-    "passed": 20,
-    "failed": 0
+    "total": 1,
+    "passed": 0,
+    "failed": 1
   },
   "failure_reason": null,
-  "blocked_reason": null,
+  "blocked_reason": "Missing required environment variables: LEMON_SQUEEZY_SANDBOX_API_KEY, LEMON_SQUEEZY_STORE_ID, LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID, LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID, LEMON_SQUEEZY_WEBHOOK_SECRET",
   "database_target": "file:data/aidiscost.db (local)",
-  "provider_request_ids": [
-    "req_mock_999"
-  ]
+  "provider_request_ids": []
 }

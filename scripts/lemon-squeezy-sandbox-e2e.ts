@@ -20,14 +20,23 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import http from 'http';
+import { execSync } from 'child_process';
 import { AddressInfo } from 'net';
 
 export type RunnerStatus = 'PASS' | 'BLOCKED' | 'FAIL';
+export type EvidenceSource =
+  | 'PROVIDER_ORIGINATED'
+  | 'LOCALLY_SIMULATED'
+  | 'API_RESPONSE'
+  | 'DATABASE_VERIFIED'
+  | 'CONFIG_VALIDATION'
+  | 'NOT_VERIFIED';
 
 export interface SandboxStepResult {
   step_number: number;
   name: string;
   category: 'CONFIG_VALIDATION' | 'PROVIDER_API' | 'HTTP_WEBHOOK' | 'DATABASE_ASSERTION';
+  evidence_source: EvidenceSource;
   status: 'PASS' | 'BLOCKED' | 'FAIL' | 'NOT_RUN';
   duration_ms: number;
   details?: string;
@@ -40,12 +49,19 @@ export interface SandboxReport {
   overall_status: RunnerStatus;
   run_id: string;
   commit_sha: string;
+  commit_provenance_verified: boolean;
   environment: string;
   sandbox_mode: boolean;
   started_at: string;
   completed_at: string;
   steps: SandboxStepResult[];
   step_status: Record<string, 'PASS' | 'BLOCKED' | 'FAIL' | 'NOT_RUN'>;
+  evidence_summary: {
+    provider_originated_events_verified: boolean;
+    locally_simulated_events_count: number;
+    api_response_verified: boolean;
+    database_verified_count: number;
+  };
   assertions: {
     total: number;
     passed: number;
@@ -167,6 +183,18 @@ export interface RunnerOptions {
   outputPath?: string;
 }
 
+export function resolveCommitSha(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.GITHUB_SHA && env.GITHUB_SHA.trim()) return env.GITHUB_SHA.trim();
+  if (env.COMMIT_SHA && env.COMMIT_SHA.trim()) return env.COMMIT_SHA.trim();
+  try {
+    const out = execSync('git rev-parse HEAD', { stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 }).toString().trim();
+    if (out && /^[0-9a-f]{40}$/i.test(out)) return out;
+  } catch {
+    // git command unavailable or not a repo
+  }
+  return 'UNKNOWN';
+}
+
 /**
  * Execute the 11-step Lemon Squeezy Sandbox E2E Runner.
  */
@@ -175,7 +203,7 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
   const fetchFn = options.fetchFn || globalThis.fetch;
   const startedAt = new Date().toISOString();
   const runId = `sb_run_${crypto.randomUUID()}`;
-  const commitSha = env.GITHUB_SHA || env.COMMIT_SHA || '414572fd5fb2ced5747f950b13efb1596ac0c450';
+  const commitSha = resolveCommitSha(env);
   const dbTarget = env.TURSO_DATABASE_URL || 'file:data/aidiscost.db (local)';
 
   const steps: SandboxStepResult[] = [];
@@ -187,6 +215,7 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
     stepNum: number,
     name: string,
     category: SandboxStepResult['category'],
+    evidenceSource: EvidenceSource,
     status: SandboxStepResult['status'],
     durationMs: number,
     details?: string,
@@ -201,6 +230,7 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
       step_number: stepNum,
       name,
       category,
+      evidence_source: evidenceSource,
       status,
       duration_ms: durationMs,
       details,
@@ -217,20 +247,20 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
   const t0 = Date.now();
   if (validation.missing.length > 0) {
     const missingMsg = `Missing required environment variables: ${validation.missing.join(', ')}`;
-    recordStep(1, 'Validate Configuration & Environment', 'CONFIG_VALIDATION', 'BLOCKED', Date.now() - t0, missingMsg, 0, 1);
+    recordStep(1, 'Validate Configuration & Environment', 'CONFIG_VALIDATION', 'CONFIG_VALIDATION', 'BLOCKED', Date.now() - t0, missingMsg, 0, 1);
     
     return buildReport('BLOCKED', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, null, missingMsg, dbTarget, providerRequestIds, options.outputPath);
   }
-  recordStep(1, 'Validate Configuration & Environment', 'CONFIG_VALIDATION', 'PASS', Date.now() - t0, 'All required configuration variables present', 1, 0);
+  recordStep(1, 'Validate Configuration & Environment', 'CONFIG_VALIDATION', 'CONFIG_VALIDATION', 'PASS', Date.now() - t0, 'All required configuration variables present', 1, 0);
 
   // Step 2: Enforce Sandbox Proof & API Credentials
   const t1 = Date.now();
   if (!validation.valid || !validation.config) {
     const blockedReason = validation.reasons.join('; ');
-    recordStep(2, 'Enforce Sandbox Proof & Anti-Live Fallback', 'CONFIG_VALIDATION', 'BLOCKED', Date.now() - t1, blockedReason, 0, 1);
+    recordStep(2, 'Enforce Sandbox Proof & Anti-Live Fallback', 'CONFIG_VALIDATION', 'CONFIG_VALIDATION', 'BLOCKED', Date.now() - t1, blockedReason, 0, 1);
     return buildReport('BLOCKED', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, null, blockedReason, dbTarget, providerRequestIds, options.outputPath);
   }
-  recordStep(2, 'Enforce Sandbox Proof & Anti-Live Fallback', 'CONFIG_VALIDATION', 'PASS', Date.now() - t1, 'Sandbox Mode strictly verified; zero fallback to live API credentials', 2, 0);
+  recordStep(2, 'Enforce Sandbox Proof & Anti-Live Fallback', 'CONFIG_VALIDATION', 'CONFIG_VALIDATION', 'PASS', Date.now() - t1, 'Sandbox Mode strictly verified; zero fallback to live API credentials', 2, 0);
 
   const config = validation.config;
 
@@ -238,10 +268,10 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
   const t2 = Date.now();
   if (config.fixPackageVariantId === config.outcomeFeeVariantId) {
     const err = 'Variant collision: Fix Package and Outcome Fee variant IDs are identical.';
-    recordStep(3, 'Verify Distinct Variant IDs', 'CONFIG_VALIDATION', 'FAIL', Date.now() - t2, err, 0, 1);
+    recordStep(3, 'Verify Distinct Variant IDs', 'CONFIG_VALIDATION', 'CONFIG_VALIDATION', 'FAIL', Date.now() - t2, err, 0, 1);
     return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, err, null, dbTarget, providerRequestIds, options.outputPath);
   }
-  recordStep(3, 'Verify Distinct Variant IDs', 'CONFIG_VALIDATION', 'PASS', Date.now() - t2, `Fix Variant: ${config.fixPackageVariantId}, Outcome Fee Variant: ${config.outcomeFeeVariantId}`, 1, 0);
+  recordStep(3, 'Verify Distinct Variant IDs', 'CONFIG_VALIDATION', 'CONFIG_VALIDATION', 'PASS', Date.now() - t2, `Fix Variant: ${config.fixPackageVariantId}, Outcome Fee Variant: ${config.outcomeFeeVariantId}`, 1, 0);
 
   // Sync process.env for the in-process application HTTP server and webhook handler
   const originalEnv: Record<string, string | undefined> = {
@@ -355,7 +385,7 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
       if (!res.ok) {
         const errText = await res.text();
         const failReason = `Lemon Squeezy Sandbox API returned ${res.status}: ${errText}`;
-        recordStep(4, 'Create Real Lemon Squeezy Sandbox Fix Package Checkout', 'PROVIDER_API', 'FAIL', Date.now() - t3, failReason, 0, 1, providerReqId);
+        recordStep(4, 'Create Real Lemon Squeezy Sandbox Fix Package Checkout', 'PROVIDER_API', 'API_RESPONSE', 'FAIL', Date.now() - t3, failReason, 0, 1, providerReqId);
         return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, failReason, null, dbTarget, providerRequestIds, options.outputPath);
       }
 
@@ -367,10 +397,10 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
         throw new Error('Sandbox API response did not contain checkout ID or checkout URL');
       }
 
-      recordStep(4, 'Create Real Lemon Squeezy Sandbox Fix Package Checkout', 'PROVIDER_API', 'PASS', Date.now() - t3, `Created Checkout ID: ${checkoutId}`, 2, 0, providerReqId);
+      recordStep(4, 'Create Real Lemon Squeezy Sandbox Fix Package Checkout', 'PROVIDER_API', 'API_RESPONSE', 'PASS', Date.now() - t3, `Created Checkout ID: ${checkoutId}`, 2, 0, providerReqId);
     } catch (checkoutErr: any) {
       const failReason = `Sandbox checkout creation failed: ${checkoutErr.message}`;
-      recordStep(4, 'Create Real Lemon Squeezy Sandbox Fix Package Checkout', 'PROVIDER_API', 'FAIL', Date.now() - t3, failReason, 0, 1);
+      recordStep(4, 'Create Real Lemon Squeezy Sandbox Fix Package Checkout', 'PROVIDER_API', 'API_RESPONSE', 'FAIL', Date.now() - t3, failReason, 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, failReason, null, dbTarget, providerRequestIds, options.outputPath);
     }
 
@@ -394,10 +424,10 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
       ? await storage.getActiveCheckoutAttempt(testUserId, testFindingId, 'FIX_PACKAGE', testAuditId)
       : null;
     if (!savedAttempt || savedAttempt.checkout_id !== checkoutId) {
-      recordStep(5, 'Verify Checkout Data & Storage Persistence', 'DATABASE_ASSERTION', 'FAIL', Date.now() - t4, 'Checkout attempt was not persisted to database', 0, 1);
+      recordStep(5, 'Verify Checkout Data & Storage Persistence', 'DATABASE_ASSERTION', 'DATABASE_VERIFIED', 'FAIL', Date.now() - t4, 'Checkout attempt was not persisted to database', 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'Checkout attempt persistence assertion failed', null, dbTarget, providerRequestIds, options.outputPath);
     }
-    recordStep(5, 'Verify Checkout Data & Storage Persistence', 'DATABASE_ASSERTION', 'PASS', Date.now() - t4, `Persisted checkout ${checkoutId} to storage`, 1, 0);
+    recordStep(5, 'Verify Checkout Data & Storage Persistence', 'DATABASE_ASSERTION', 'DATABASE_VERIFIED', 'PASS', Date.now() - t4, `Persisted checkout ${checkoutId} to storage`, 1, 0);
 
     // Step 6: HTTP Integration — Submit order_created Event via HTTP
     const t5 = Date.now();
@@ -446,20 +476,20 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
     if (ocRes.status !== 200) {
       const errText = await ocRes.text();
       const failReason = `order_created HTTP webhook failed with status ${ocRes.status}: ${errText}`;
-      recordStep(6, 'HTTP Webhook: order_created ($49.00 USD)', 'HTTP_WEBHOOK', 'FAIL', Date.now() - t5, failReason, 0, 1);
+      recordStep(6, 'HTTP Webhook: order_created ($49.00 USD)', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'FAIL', Date.now() - t5, failReason, 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, failReason, null, dbTarget, providerRequestIds, options.outputPath);
     }
-    recordStep(6, 'HTTP Webhook: order_created ($49.00 USD)', 'HTTP_WEBHOOK', 'PASS', Date.now() - t5, 'Successfully delivered signed order_created event to application HTTP endpoint', 1, 0);
+    recordStep(6, 'HTTP Webhook: order_created ($49.00 USD)', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'PASS', Date.now() - t5, 'Successfully delivered signed order_created event to application HTTP endpoint', 1, 0);
 
     // Step 7: Database Verification — Entitlement Activation
     const t6 = Date.now();
     const entitlement = await storage.getEntitlement(testUserId, testFindingId, testAuditId);
     if (!entitlement || entitlement.status !== 'ACTIVE' || entitlement.type !== 'PAID_FIX_PACKAGE') {
       const failReason = `Entitlement state invalid: status=${entitlement?.status}, type=${entitlement?.type}`;
-      recordStep(7, 'Verify Entitlement State in Storage', 'DATABASE_ASSERTION', 'FAIL', Date.now() - t6, failReason, 0, 1);
+      recordStep(7, 'Verify Entitlement State in Storage', 'DATABASE_ASSERTION', 'DATABASE_VERIFIED', 'FAIL', Date.now() - t6, failReason, 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, failReason, null, dbTarget, providerRequestIds, options.outputPath);
     }
-    recordStep(7, 'Verify Entitlement State in Storage', 'DATABASE_ASSERTION', 'PASS', Date.now() - t6, `Entitlement ${entitlement.id} is ACTIVE for finding ${testFindingId}`, 2, 0);
+    recordStep(7, 'Verify Entitlement State in Storage', 'DATABASE_ASSERTION', 'DATABASE_VERIFIED', 'PASS', Date.now() - t6, `Entitlement ${entitlement.id} is ACTIVE for finding ${testFindingId}`, 2, 0);
 
     // Step 8: HTTP Integration — Submit order_settled Event via HTTP
     const t7 = Date.now();
@@ -503,15 +533,15 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
     });
     if (osRes.status !== 200) {
       const errText = await osRes.text();
-      recordStep(8, 'HTTP Webhook: order_settled Transition', 'HTTP_WEBHOOK', 'FAIL', Date.now() - t7, `order_settled failed: ${errText}`, 0, 1);
+      recordStep(8, 'HTTP Webhook: order_settled Transition', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'FAIL', Date.now() - t7, `order_settled failed: ${errText}`, 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'order_settled failed', null, dbTarget, providerRequestIds, options.outputPath);
     }
     const entAfterSettle = await storage.getEntitlement(testUserId, testFindingId, testAuditId);
     if (!entAfterSettle || entAfterSettle.status !== 'ACTIVE') {
-      recordStep(8, 'HTTP Webhook: order_settled Transition', 'DATABASE_ASSERTION', 'FAIL', Date.now() - t7, 'Entitlement did not remain ACTIVE after order_settled', 0, 1);
+      recordStep(8, 'HTTP Webhook: order_settled Transition', 'DATABASE_ASSERTION', 'DATABASE_VERIFIED', 'FAIL', Date.now() - t7, 'Entitlement did not remain ACTIVE after order_settled', 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'Entitlement lost active state on settle', null, dbTarget, providerRequestIds, options.outputPath);
     }
-    recordStep(8, 'HTTP Webhook: order_settled Transition', 'HTTP_WEBHOOK', 'PASS', Date.now() - t7, 'order_settled handled idempotently; entitlement remains ACTIVE', 2, 0);
+    recordStep(8, 'HTTP Webhook: order_settled Transition', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'PASS', Date.now() - t7, 'order_settled handled idempotently; entitlement remains ACTIVE', 2, 0);
 
     // Step 9: Outcome Fee Obligation Lifecycle & Checkout
     const t8 = Date.now();
@@ -596,15 +626,15 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
 
     if (ofRes.status !== 200) {
       const errText = await ofRes.text();
-      recordStep(9, 'Outcome Fee Obligation & Webhook Lifecycle', 'HTTP_WEBHOOK', 'FAIL', Date.now() - t8, `Outcome fee webhook failed: ${errText}`, 0, 1);
+      recordStep(9, 'Outcome Fee Obligation & Webhook Lifecycle', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'FAIL', Date.now() - t8, `Outcome fee webhook failed: ${errText}`, 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'Outcome fee webhook failed', null, dbTarget, providerRequestIds, options.outputPath);
     }
     const obAfterPay = await storage.getOutcomeFeeObligation(testFindingId, testUserId, testAuditId);
     if (!obAfterPay || obAfterPay.status !== 'PAID') {
-      recordStep(9, 'Outcome Fee Obligation & Webhook Lifecycle', 'DATABASE_ASSERTION', 'FAIL', Date.now() - t8, `Obligation status is ${obAfterPay?.status}, expected PAID`, 0, 1);
+      recordStep(9, 'Outcome Fee Obligation & Webhook Lifecycle', 'DATABASE_ASSERTION', 'DATABASE_VERIFIED', 'FAIL', Date.now() - t8, `Obligation status is ${obAfterPay?.status}, expected PAID`, 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'Obligation not marked PAID', null, dbTarget, providerRequestIds, options.outputPath);
     }
-    recordStep(9, 'Outcome Fee Obligation & Webhook Lifecycle', 'HTTP_WEBHOOK', 'PASS', Date.now() - t8, 'Obligation transitioned to PAID upon exact $1,000.00 payment confirmation', 2, 0);
+    recordStep(9, 'Outcome Fee Obligation & Webhook Lifecycle', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'PASS', Date.now() - t8, 'Obligation transitioned to PAID upon exact $1,000.00 payment confirmation', 2, 0);
 
     // Step 10: Idempotency, Duplicate Prevention, Underpayment, & Currency Mismatch
     const t9 = Date.now();
@@ -619,7 +649,7 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
     });
     const dupJson: any = await dupRes.json();
     if (dupJson?.status !== 'IDEMPOTENT_DUPLICATE') {
-      recordStep(10, 'Idempotency, Underpayment & Currency Verification', 'HTTP_WEBHOOK', 'FAIL', Date.now() - t9, 'Duplicate webhook event was not recognized as idempotent', 0, 1);
+      recordStep(10, 'Idempotency, Underpayment & Currency Verification', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'FAIL', Date.now() - t9, 'Duplicate webhook event was not recognized as idempotent', 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'Duplicate webhook idempotency failure', null, dbTarget, providerRequestIds, options.outputPath);
     }
 
@@ -655,7 +685,7 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
       body: underpayBody,
     });
     if (underpayRes.status !== 400) {
-      recordStep(10, 'Idempotency, Underpayment & Currency Verification', 'HTTP_WEBHOOK', 'FAIL', Date.now() - t9, `Underpayment returned status ${underpayRes.status}, expected 400`, 0, 1);
+      recordStep(10, 'Idempotency, Underpayment & Currency Verification', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'FAIL', Date.now() - t9, `Underpayment returned status ${underpayRes.status}, expected 400`, 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'Underpayment was not rejected', null, dbTarget, providerRequestIds, options.outputPath);
     }
 
@@ -690,10 +720,10 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
       body: currBody,
     });
     if (currRes.status !== 400) {
-      recordStep(10, 'Idempotency, Underpayment & Currency Verification', 'HTTP_WEBHOOK', 'FAIL', Date.now() - t9, `Currency mismatch returned status ${currRes.status}, expected 400`, 0, 1);
+      recordStep(10, 'Idempotency, Underpayment & Currency Verification', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'FAIL', Date.now() - t9, `Currency mismatch returned status ${currRes.status}, expected 400`, 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'Currency mismatch was not rejected', null, dbTarget, providerRequestIds, options.outputPath);
     }
-    recordStep(10, 'Idempotency, Underpayment & Currency Verification', 'HTTP_WEBHOOK', 'PASS', Date.now() - t9, 'Duplicate events deduplicated; underpayment ($10.00) and currency mismatch (EUR) strictly rejected', 3, 0);
+    recordStep(10, 'Idempotency, Underpayment & Currency Verification', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'PASS', Date.now() - t9, 'Duplicate events deduplicated; underpayment ($10.00) and currency mismatch (EUR) strictly rejected', 3, 0);
 
     // Step 11: Full Refund, Partial Refund, & Monotonic Non-Regression
     const t10 = Date.now();
@@ -731,12 +761,12 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
     });
     if (refRes.status !== 200) {
       const errText = await refRes.text();
-      recordStep(11, 'Refunds, Reconciliation & Monotonic Non-Regression', 'HTTP_WEBHOOK', 'FAIL', Date.now() - t10, `Refund failed: ${errText}`, 0, 1);
+      recordStep(11, 'Refunds, Reconciliation & Monotonic Non-Regression', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'FAIL', Date.now() - t10, `Refund failed: ${errText}`, 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'Refund webhook failed', null, dbTarget, providerRequestIds, options.outputPath);
     }
     const entAfterRefund = await storage.getEntitlement(testUserId, testFindingId, testAuditId);
     if (!entAfterRefund || entAfterRefund.status !== 'REVOKED') {
-      recordStep(11, 'Refunds, Reconciliation & Monotonic Non-Regression', 'DATABASE_ASSERTION', 'FAIL', Date.now() - t10, `Entitlement status is ${entAfterRefund?.status}, expected REVOKED`, 0, 1);
+      recordStep(11, 'Refunds, Reconciliation & Monotonic Non-Regression', 'DATABASE_ASSERTION', 'DATABASE_VERIFIED', 'FAIL', Date.now() - t10, `Entitlement status is ${entAfterRefund?.status}, expected REVOKED`, 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'Entitlement not revoked on refund', null, dbTarget, providerRequestIds, options.outputPath);
     }
 
@@ -757,11 +787,11 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
     });
     const entAfterLate = await storage.getEntitlement(testUserId, testFindingId, testAuditId);
     if (!entAfterLate || entAfterLate.status !== 'REVOKED') {
-      recordStep(11, 'Refunds, Reconciliation & Monotonic Non-Regression', 'DATABASE_ASSERTION', 'FAIL', Date.now() - t10, 'Delayed order_created regressed REVOKED entitlement back to ACTIVE', 0, 1);
+      recordStep(11, 'Refunds, Reconciliation & Monotonic Non-Regression', 'DATABASE_ASSERTION', 'DATABASE_VERIFIED', 'FAIL', Date.now() - t10, 'Delayed order_created regressed REVOKED entitlement back to ACTIVE', 0, 1);
       return buildReport('FAIL', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, 'Monotonic non-regression violated', null, dbTarget, providerRequestIds, options.outputPath);
     }
 
-    recordStep(11, 'Refunds, Reconciliation & Monotonic Non-Regression', 'HTTP_WEBHOOK', 'PASS', Date.now() - t10, 'Full refund revokes entitlement; monotonic guard prohibits late re-activation', 3, 0);
+    recordStep(11, 'Refunds, Reconciliation & Monotonic Non-Regression', 'HTTP_WEBHOOK', 'LOCALLY_SIMULATED', 'PASS', Date.now() - t10, 'Full refund revokes entitlement; monotonic guard prohibits late re-activation', 3, 0);
 
     return buildReport('PASS', runId, commitSha, env, startedAt, steps, totalAssertionsPassed, totalAssertionsFailed, null, null, dbTarget, providerRequestIds, options.outputPath);
   } finally {
@@ -796,16 +826,26 @@ function buildReport(
     stepStatus[`step_${s.step_number}`] = s.status;
   }
 
+  const commitProvenanceVerified = commitSha !== 'UNKNOWN' && /^[0-9a-f]{40}$/i.test(commitSha);
+  const evidenceSummary = {
+    provider_originated_events_verified: steps.some((s) => s.evidence_source === 'PROVIDER_ORIGINATED' && s.status === 'PASS'),
+    locally_simulated_events_count: steps.filter((s) => s.evidence_source === 'LOCALLY_SIMULATED').length,
+    api_response_verified: steps.some((s) => s.evidence_source === 'API_RESPONSE' && s.status === 'PASS'),
+    database_verified_count: steps.filter((s) => s.evidence_source === 'DATABASE_VERIFIED' && s.status === 'PASS').length,
+  };
+
   const report: SandboxReport = {
     overall_status: overallStatus,
     run_id: runId,
     commit_sha: commitSha,
+    commit_provenance_verified: commitProvenanceVerified,
     environment: env.NODE_ENV || 'development',
     sandbox_mode: env.LEMON_SQUEEZY_SANDBOX === 'true' || env.LEMON_SQUEEZY_TEST_MODE === 'true',
     started_at: startedAt,
     completed_at: completedAt,
     steps,
     step_status: stepStatus,
+    evidence_summary: evidenceSummary,
     assertions: {
       total: passed + failed,
       passed,

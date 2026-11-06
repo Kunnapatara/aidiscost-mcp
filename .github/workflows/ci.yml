@@ -128,7 +128,6 @@ jobs:
         env:
           TURSO_TEST_DATABASE_URL: ${{ secrets.TURSO_TEST_DATABASE_URL }}
           TURSO_TEST_AUTH_TOKEN: ${{ secrets.TURSO_TEST_AUTH_TOKEN }}
-          TURSO_ALLOW_TEST_MIGRATIONS: "true"
 
   sandbox-e2e:
     name: Lemon Squeezy Sandbox E2E Verification
