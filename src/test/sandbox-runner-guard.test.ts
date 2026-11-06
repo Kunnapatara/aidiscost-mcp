@@ -240,13 +240,175 @@ describe('AIDisCost MCP — Area 2 Sandbox Mode Enforcement & Outbound Guard Tes
     const report = await executeSandboxE2E({
       env,
       fetchFn: fetchSpy,
+      mode: 'LOCAL_SIMULATION',
     });
 
     assert.strictEqual(capturedUrl, 'https://api.lemonsqueezy.com/v1/checkouts');
     assert.strictEqual(capturedMethod, 'POST');
     assert.strictEqual(capturedAuthHeader, 'Bearer valid_test_sandbox_api_key_abc');
-    assert.strictEqual(report.overall_status, 'PASS', 'Complete 11-step execution must PASS');
+    assert.strictEqual(report.overall_status, 'PASS', 'Complete 11-step execution in LOCAL_SIMULATION mode must PASS');
+    assert.strictEqual(report.test_type, 'LOCAL_SIMULATION');
+    assert.strictEqual(report.evidence_summary.provider_originated_events_verified, false, 'Simulated events must never claim genuine provider origin');
     assert.strictEqual(report.assertions.failed, 0);
     assert.ok(report.assertions.passed >= 15, 'All step assertions must be recorded');
+  });
+
+  // Test H: Genuine Provider E2E mode halts with BLOCKED on unverified provider webhook
+  test('Test H: Genuine Provider E2E mode halts with BLOCKED when provider-originated webhook cannot be verified', async () => {
+    let capturedUrl = '';
+    const fetchSpy: typeof fetch = async (input, init) => {
+      const urlStr = String(input);
+      if (urlStr.includes('api.lemonsqueezy.com')) {
+        capturedUrl = urlStr;
+        return new Response(
+          JSON.stringify({
+            data: {
+              id: 'chk_sb_provider_123',
+              type: 'checkouts',
+              attributes: {
+                url: 'https://aidiscost.lemonsqueezy.com/buy/chk_sb_provider_123',
+              },
+            },
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/vnd.api+json' } }
+        );
+      }
+      return globalThis.fetch(input, init);
+    };
+
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      LEMON_SQUEEZY_SANDBOX: 'true',
+      LEMON_SQUEEZY_SANDBOX_API_KEY: 'valid_test_sandbox_api_key_abc',
+      LEMON_SQUEEZY_STORE_ID: 'store_9999',
+      LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID: 'var_fix_99',
+      LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID: 'var_fee_88',
+      LEMON_SQUEEZY_WEBHOOK_SECRET: 'wh_secret_valid_123',
+    };
+
+    const report = await executeSandboxE2E({
+      env,
+      fetchFn: fetchSpy,
+      mode: 'GENUINE_PROVIDER_E2E',
+    });
+
+    assert.strictEqual(capturedUrl, 'https://api.lemonsqueezy.com/v1/checkouts', 'Real checkout created');
+    assert.strictEqual(report.overall_status, 'BLOCKED', 'Genuine Provider E2E must report BLOCKED when provider webhook is missing');
+    assert.strictEqual(report.test_type, 'GENUINE_PROVIDER_E2E');
+    assert.strictEqual(report.evidence_summary.provider_originated_events_verified, false);
+    assert.ok(report.blocked_reason?.includes('GENUINE PROVIDER E2E BLOCKED'));
+  });
+
+  // Test I: LEMON_SQUEEZY_TEST_MODE=true without LEMON_SQUEEZY_SANDBOX=true is strictly rejected
+  test('Test I: LEMON_SQUEEZY_TEST_MODE=true without LEMON_SQUEEZY_SANDBOX=true is strictly rejected', async () => {
+    let outboundRequestsCount = 0;
+    const fetchSpy: typeof fetch = async () => {
+      outboundRequestsCount++;
+      return new Response('{}', { status: 200 });
+    };
+
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      LEMON_SQUEEZY_TEST_MODE: 'true', // Test mode alone is not acceptable
+      // LEMON_SQUEEZY_SANDBOX omitted
+      LEMON_SQUEEZY_SANDBOX_API_KEY: 'test_sb_key_123',
+      LEMON_SQUEEZY_STORE_ID: 'store_123',
+      LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID: 'var_fix_1',
+      LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID: 'var_fee_2',
+      LEMON_SQUEEZY_WEBHOOK_SECRET: 'wh_secret_123',
+    };
+
+    const validation = validateSandboxConfig(env);
+    assert.strictEqual(validation.valid, false);
+    assert.strictEqual(validation.blocked, true);
+    assert.ok(validation.reasons.some((r) => r.includes('LEMON_SQUEEZY_TEST_MODE=true cannot substitute')));
+
+    const report = await executeSandboxE2E({ env, fetchFn: fetchSpy });
+    assert.strictEqual(outboundRequestsCount, 0);
+    assert.strictEqual(report.overall_status, 'BLOCKED');
+  });
+
+  // Test J: ALLOW_LEMON_SQUEEZY_API_KEY_IN_SANDBOX override is prohibited and rejected
+  test('Test J: ALLOW_LEMON_SQUEEZY_API_KEY_IN_SANDBOX override is prohibited and rejected', async () => {
+    let outboundRequestsCount = 0;
+    const fetchSpy: typeof fetch = async () => {
+      outboundRequestsCount++;
+      return new Response('{}', { status: 200 });
+    };
+
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      LEMON_SQUEEZY_SANDBOX: 'true',
+      LEMON_SQUEEZY_API_KEY: 'live_generic_api_key',
+      ALLOW_LEMON_SQUEEZY_API_KEY_IN_SANDBOX: 'true', // Attempted override!
+      LEMON_SQUEEZY_STORE_ID: 'store_123',
+      LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID: 'var_fix_1',
+      LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID: 'var_fee_2',
+      LEMON_SQUEEZY_WEBHOOK_SECRET: 'wh_secret_123',
+    };
+
+    const validation = validateSandboxConfig(env);
+    assert.strictEqual(validation.valid, false);
+    assert.strictEqual(validation.blocked, true);
+    assert.ok(validation.reasons.some((r) => r.includes('ALLOW_LEMON_SQUEEZY_API_KEY_IN_SANDBOX is prohibited')));
+
+    const report = await executeSandboxE2E({ env, fetchFn: fetchSpy });
+    assert.strictEqual(outboundRequestsCount, 0);
+    assert.strictEqual(report.overall_status, 'BLOCKED');
+  });
+
+  // Test K: Missing Webhook Secret is strictly rejected
+  test('Test K: Missing Webhook Secret causes zero outbound API requests and reports BLOCKED', async () => {
+    let outboundRequestsCount = 0;
+    const fetchSpy: typeof fetch = async () => {
+      outboundRequestsCount++;
+      return new Response('{}', { status: 200 });
+    };
+
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      LEMON_SQUEEZY_SANDBOX: 'true',
+      LEMON_SQUEEZY_SANDBOX_API_KEY: 'test_sb_key_123',
+      LEMON_SQUEEZY_STORE_ID: 'store_123',
+      LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID: 'var_fix_1',
+      LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID: 'var_fee_2',
+      LEMON_SQUEEZY_WEBHOOK_SECRET: '', // Missing!
+    };
+
+    const validation = validateSandboxConfig(env);
+    assert.strictEqual(validation.valid, false);
+    assert.ok(validation.missing.includes('LEMON_SQUEEZY_WEBHOOK_SECRET'));
+
+    const report = await executeSandboxE2E({ env, fetchFn: fetchSpy });
+    assert.strictEqual(outboundRequestsCount, 0);
+    assert.strictEqual(report.overall_status, 'BLOCKED');
+  });
+
+  // Test L: Missing Store ID or Variant ID is strictly rejected
+  test('Test L: Missing Store ID or Variant ID causes zero outbound API requests and reports BLOCKED', async () => {
+    let outboundRequestsCount = 0;
+    const fetchSpy: typeof fetch = async () => {
+      outboundRequestsCount++;
+      return new Response('{}', { status: 200 });
+    };
+
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      LEMON_SQUEEZY_SANDBOX: 'true',
+      LEMON_SQUEEZY_SANDBOX_API_KEY: 'test_sb_key_123',
+      LEMON_SQUEEZY_STORE_ID: '', // Missing!
+      LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID: 'var_fix_1',
+      LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID: '', // Missing!
+      LEMON_SQUEEZY_WEBHOOK_SECRET: 'wh_secret_123',
+    };
+
+    const validation = validateSandboxConfig(env);
+    assert.strictEqual(validation.valid, false);
+    assert.ok(validation.missing.includes('LEMON_SQUEEZY_STORE_ID'));
+    assert.ok(validation.missing.includes('LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID'));
+
+    const report = await executeSandboxE2E({ env, fetchFn: fetchSpy });
+    assert.strictEqual(outboundRequestsCount, 0);
+    assert.strictEqual(report.overall_status, 'BLOCKED');
   });
 });

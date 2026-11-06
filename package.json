@@ -13,6 +13,7 @@
     "db:migrate": "tsx scripts/migrate-db.ts",
     "migrate:json": "tsx scripts/migrate-json-to-sql.ts",
     "test:sandbox": "tsx scripts/lemon-squeezy-sandbox-e2e.ts",
+    "test:sandbox:simulate": "tsx scripts/lemon-squeezy-sandbox-e2e.ts --simulate",
     "test:turso": "tsx scripts/test-remote-turso-migrations.ts",
     "test": "node --import tsx --test src/test/*.test.ts"
   },

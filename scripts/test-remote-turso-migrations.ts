@@ -10,8 +10,8 @@
  *
  * SAFETY INVARIANTS:
  * 1. Strictly refuses to execute against production databases or in production environments.
- * 2. Requires positive verification of test database target (URL containing test/dev/sandbox
- *    or explicit TURSO_ALLOW_TEST_MIGRATIONS=true).
+ * 2. Requires positive verification of test database identity against an explicit approved allowlist.
+ *    Arbitrary URLs containing "test" or "disposable" are strictly rejected unless in the allowlist.
  * 3. Never claims Turso verification based on local SQLite or file: URLs.
  * 4. Exits with code 2 on BLOCKED, code 1 on FAIL, code 0 on PASS.
  */
@@ -34,6 +34,26 @@ export interface TursoValidationResult {
   authToken?: string;
 }
 
+export const APPROVED_TEST_DATABASE_IDENTIFIERS = [
+  'aidiscost-test-disposable',
+  'aidiscost-disposable-test-db',
+  'aidiscost-test-sandbox',
+  'aidiscost-ci-test',
+] as const;
+
+export function extractDatabaseIdentity(rawUrl: string): { host: string; dbId: string } | null {
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.toLowerCase();
+    if (!host) return null;
+    const firstSubdomain = host.split('.')[0];
+    if (!firstSubdomain) return null;
+    return { host, dbId: firstSubdomain };
+  } catch {
+    return null;
+  }
+}
+
 export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): TursoValidationResult {
   const isProduction = (env.NODE_ENV || '').toLowerCase() === 'production';
   if (isProduction) {
@@ -47,6 +67,7 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
   const testUrl = (env.TURSO_TEST_DATABASE_URL || '').trim();
   const testAuthToken = (env.TURSO_TEST_AUTH_TOKEN || '').trim();
   const primaryUrl = (env.TURSO_DATABASE_URL || '').trim();
+  const explicitTestDbId = (env.TURSO_TEST_DATABASE_ID || '').trim().toLowerCase();
 
   // Strict requirement: Dedicated test credentials (no fallback to generic production variables)
   if (!testUrl) {
@@ -98,7 +119,14 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
     };
   }
 
-  // Safety preflight: target database must be identifiable as an isolated disposable test database
+  // Override Protection: Verify no environment variable attempts to bypass security checks
+  // No environment variable is permitted to turn an unallowlisted database into a safe test database
+  const attemptedBypass =
+    env.TURSO_ALLOW_TEST_MIGRATIONS === 'true' ||
+    env.ALLOW_UNVERIFIED_DATABASE === 'true' ||
+    env.BYPASS_TURSO_ALLOWLIST === 'true';
+
+  // Safety preflight: target database must not have production indicators
   const lowerUrl = testUrl.toLowerCase();
   const hasProdIndicator =
     lowerUrl.includes('prod') ||
@@ -114,18 +142,53 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
     };
   }
 
-  const hasTestIndicator =
-    lowerUrl.includes('test') ||
-    lowerUrl.includes('dev') ||
-    lowerUrl.includes('sandbox') ||
-    lowerUrl.includes('temp') ||
-    lowerUrl.includes('disposable');
-
-  if (!hasTestIndicator) {
+  // A1: Database Identity Verification
+  const parsedIdentity = extractDatabaseIdentity(testUrl);
+  if (!parsedIdentity) {
     return {
       valid: false,
       blocked: false,
-      reason: `UNVERIFIED DATABASE TARGET: Database URL "${testUrl}" does not contain an approved test indicator (test, dev, sandbox, temp, disposable).`,
+      reason: `UNVERIFIABLE DATABASE TARGET: Could not extract hostname or database identity from "${testUrl}".`,
+    };
+  }
+
+  const { host, dbId } = parsedIdentity;
+
+  // Build configured allowlist
+  const envAllowlist = (env.TURSO_TEST_DATABASE_ALLOWLIST || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
+  const fullAllowlist = new Set<string>([
+    ...APPROVED_TEST_DATABASE_IDENTIFIERS.map((id) => id.toLowerCase()),
+    ...envAllowlist,
+  ]);
+
+  // If explicit TURSO_TEST_DATABASE_ID is provided, verify it matches the database URL host/identity
+  if (explicitTestDbId) {
+    const matchesIdentity = dbId === explicitTestDbId || host.startsWith(explicitTestDbId) || dbId.startsWith(explicitTestDbId);
+    if (!matchesIdentity) {
+      return {
+        valid: false,
+        blocked: false,
+        reason: `DATABASE IDENTITY MISMATCH: Configured TURSO_TEST_DATABASE_ID "${explicitTestDbId}" does not match target database identity "${dbId}" (${host}).`,
+      };
+    }
+  }
+
+  // Check allowlist: either dbId or host must be explicitly in the allowlist
+  const isAllowlisted =
+    fullAllowlist.has(dbId) ||
+    fullAllowlist.has(host) ||
+    Array.from(fullAllowlist).some((allowed) => dbId === allowed || dbId.startsWith(`${allowed}-`) || host.startsWith(`${allowed}.`));
+
+  if (!isAllowlisted) {
+    const bypassNote = attemptedBypass ? ' Security bypass attempt rejected; allowlist enforcement cannot be overridden.' : '';
+    return {
+      valid: false,
+      blocked: false,
+      reason: `UNAUTHORIZED DATABASE TARGET: Database identity "${dbId}" (${host}) is not in the approved test database allowlist. URL substrings (e.g. "test", "disposable") alone do not prove database identity.${bypassNote}`,
     };
   }
 
