@@ -1,10 +1,10 @@
 {
   "overall_status": "BLOCKED",
-  "run_id": "sb_run_f4666ca3-63e2-4378-b631-66ed14a72554",
-  "commit_sha": "UNKNOWN",
-  "commit_provenance_verified": false,
+  "run_id": "sb_run_6860bb04-10c7-4439-bedc-1777fbc180d8",
+  "commit_sha": "5062d117753a11d2718c7332fa29805ef33a6440",
+  "commit_provenance_verified": true,
   "branch": "main",
-  "execution_timestamp": "2026-11-06T12:45:56.349Z",
+  "execution_timestamp": "2026-11-06T13:22:08.368Z",
   "environment": "development",
   "sandbox_mode": false,
   "test_type": "GENUINE_PROVIDER_E2E",
@@ -14,8 +14,8 @@
   "provider_originated_webhook_verified": false,
   "payment_status": "BLOCKED",
   "refund_status": "BLOCKED",
-  "started_at": "2026-11-06T12:45:56.349Z",
-  "completed_at": "2026-11-06T12:45:56.359Z",
+  "started_at": "2026-11-06T13:22:08.368Z",
+  "completed_at": "2026-11-06T13:22:08.369Z",
   "steps": [
     {
       "step_number": 1,
