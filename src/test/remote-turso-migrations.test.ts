@@ -199,4 +199,75 @@ describe('AIDisCost MCP — Area 6 Remote Turso Migration Guard & Safety Tests',
     assert.strictEqual(validation.valid, true);
     assert.strictEqual(validation.url, 'libsql://my-custom-test-env.turso.io');
   });
+
+  test('13. Prefix variant of allowed database name is strictly rejected with FAIL (exact match required)', async () => {
+    // aidiscost-test-disposable-production must NOT be allowed merely because it starts with aidiscost-test-disposable
+    const envPrefixProd: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'libsql://aidiscost-test-disposable-production.turso.io',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const valPrefixProd = validateTursoTestConfig(envPrefixProd);
+    assert.strictEqual(valPrefixProd.valid, false, 'Prefix variant with -production must fail');
+    assert.ok(valPrefixProd.reason?.includes('UNAUTHORIZED DATABASE TARGET') || valPrefixProd.reason?.includes('POTENTIAL PRODUCTION TARGET'));
+
+    const resPrefixProd = await runRemoteTursoMigrationTest(envPrefixProd);
+    assert.strictEqual(resPrefixProd.status, 'FAIL');
+
+    // aidiscost-test-disposable-extra must also fail (non-prod prefix variant)
+    const envPrefixExtra: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'libsql://aidiscost-test-disposable-extra.turso.io',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const valPrefixExtra = validateTursoTestConfig(envPrefixExtra);
+    assert.strictEqual(valPrefixExtra.valid, false, 'Prefix variant with -extra must fail');
+    assert.ok(valPrefixExtra.reason?.includes('Exact match against approved test database identifiers is strictly required'));
+
+    const resPrefixExtra = await runRemoteTursoMigrationTest(envPrefixExtra);
+    assert.strictEqual(resPrefixExtra.status, 'FAIL');
+  });
+
+  test('14. Suffix variant of allowed database name is strictly rejected with FAIL', async () => {
+    const envSuffix: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'libsql://staging-aidiscost-ci-test.turso.io',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const valSuffix = validateTursoTestConfig(envSuffix);
+    assert.strictEqual(valSuffix.valid, false, 'Suffix/prefix prepended variant must fail');
+    assert.ok(valSuffix.reason?.includes('UNAUTHORIZED DATABASE TARGET'));
+
+    const resSuffix = await runRemoteTursoMigrationTest(envSuffix);
+    assert.strictEqual(resSuffix.status, 'FAIL');
+  });
+
+  test('15. Missing or empty database ID is strictly rejected with FAIL', async () => {
+    // Case A: TURSO_TEST_DATABASE_ID provided but empty string
+    const envEmptyId: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'libsql://aidiscost-disposable-test-db.turso.io',
+      TURSO_TEST_DATABASE_ID: '   ', // whitespace / empty
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const valEmptyId = validateTursoTestConfig(envEmptyId);
+    assert.strictEqual(valEmptyId.valid, false);
+    assert.ok(valEmptyId.reason?.includes('DATABASE IDENTITY INVALID'));
+
+    const resEmptyId = await runRemoteTursoMigrationTest(envEmptyId);
+    assert.strictEqual(resEmptyId.status, 'FAIL');
+
+    // Case B: URL missing database ID entirely
+    const envNoSubdomain: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'libsql://.turso.io',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const valNoSubdomain = validateTursoTestConfig(envNoSubdomain);
+    assert.strictEqual(valNoSubdomain.valid, false);
+
+    const resNoSubdomain = await runRemoteTursoMigrationTest(envNoSubdomain);
+    assert.strictEqual(resNoSubdomain.status, 'FAIL');
+  });
 });
+

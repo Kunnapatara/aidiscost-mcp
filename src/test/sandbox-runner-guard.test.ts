@@ -411,4 +411,55 @@ describe('AIDisCost MCP — Area 2 Sandbox Mode Enforcement & Outbound Guard Tes
     assert.strictEqual(outboundRequestsCount, 0);
     assert.strictEqual(report.overall_status, 'BLOCKED');
   });
+
+  // Test M: Setting LEMON_SQUEEZY_PROVIDER_WEBHOOK_DELIVERED=true cannot bypass genuine webhook requirement or fabricate PASS
+  test('Test M: Setting LEMON_SQUEEZY_PROVIDER_WEBHOOK_DELIVERED=true cannot bypass genuine webhook requirement or fabricate PASS', async () => {
+    let capturedUrl = '';
+    const fetchSpy: typeof fetch = async (input, init) => {
+      const urlStr = String(input);
+      if (urlStr.includes('api.lemonsqueezy.com')) {
+        capturedUrl = urlStr;
+        return new Response(
+          JSON.stringify({
+            data: {
+              id: 'chk_sb_provider_999',
+              type: 'checkouts',
+              attributes: {
+                url: 'https://aidiscost.lemonsqueezy.com/buy/chk_sb_provider_999',
+              },
+            },
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/vnd.api+json' } }
+        );
+      }
+      return globalThis.fetch(input, init);
+    };
+
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      LEMON_SQUEEZY_SANDBOX: 'true',
+      LEMON_SQUEEZY_SANDBOX_API_KEY: 'valid_test_sandbox_api_key_abc',
+      LEMON_SQUEEZY_STORE_ID: 'store_9999',
+      LEMON_SQUEEZY_FIX_PACKAGE_VARIANT_ID: 'var_fix_99',
+      LEMON_SQUEEZY_OUTCOME_FEE_VARIANT_ID: 'var_fee_88',
+      LEMON_SQUEEZY_WEBHOOK_SECRET: 'wh_secret_valid_123',
+      LEMON_SQUEEZY_WEBHOOK_URL: 'https://public-receiver.aidiscost.io/api/webhooks/lemon-squeezy',
+      LEMON_SQUEEZY_PROVIDER_WEBHOOK_DELIVERED: 'true', // Attempted boolean bypass!
+    };
+
+    const report = await executeSandboxE2E({
+      env,
+      fetchFn: fetchSpy,
+      mode: 'GENUINE_PROVIDER_E2E',
+    });
+
+    assert.strictEqual(capturedUrl, 'https://api.lemonsqueezy.com/v1/checkouts', 'Real checkout created');
+    assert.strictEqual(report.overall_status, 'BLOCKED', 'Genuine Provider E2E must remain BLOCKED despite boolean env flag');
+    assert.strictEqual(report.test_type, 'GENUINE_PROVIDER_E2E');
+    assert.strictEqual(report.provider_originated_webhook_verified, false, 'Boolean env var must never verify provider webhook');
+    assert.strictEqual(report.provider_event_id, null, 'No fake provider event ID allowed');
+    assert.strictEqual(report.transaction_reference, 'chk_sb_provider_999', 'Checkout reference preserved');
+    assert.ok(report.provenance.includes('BLOCKED'), 'Provenance must reflect BLOCKED');
+    assert.ok(report.blocked_reason?.includes('GENUINE PROVIDER WEBHOOK NOT VERIFIED'), 'Blocked reason must state webhook not verified');
+  });
 });

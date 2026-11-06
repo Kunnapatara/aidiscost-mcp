@@ -47,7 +47,7 @@ export function extractDatabaseIdentity(rawUrl: string): { host: string; dbId: s
     const host = parsed.hostname.toLowerCase();
     if (!host) return null;
     const firstSubdomain = host.split('.')[0];
-    if (!firstSubdomain) return null;
+    if (!firstSubdomain || firstSubdomain.trim() === '') return null;
     return { host, dbId: firstSubdomain };
   } catch {
     return null;
@@ -75,13 +75,13 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
       return {
         valid: false,
         blocked: true,
-        reason: 'Generic TURSO_DATABASE_URL cannot be used for remote migration tests. Dedicated TURSO_TEST_DATABASE_URL is strictly required to prevent accidental production modifications.',
+        reason: 'BLOCKED — REMOTE DATABASE IDENTITY NOT VERIFIED: Generic TURSO_DATABASE_URL cannot be used for remote migration tests. Dedicated TURSO_TEST_DATABASE_URL is strictly required to prevent accidental production modifications.',
       };
     }
     return {
       valid: false,
       blocked: true,
-      reason: 'TURSO_TEST_DATABASE_URL is not configured in the environment. Dedicated remote test database credentials are required.',
+      reason: 'BLOCKED — REMOTE DATABASE IDENTITY NOT VERIFIED: TURSO_TEST_DATABASE_URL is not configured in the environment. Dedicated remote test database credentials are required.',
     };
   }
 
@@ -90,7 +90,7 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
     return {
       valid: false,
       blocked: true,
-      reason: `Local database URL "${testUrl}" detected. Remote Turso verification requires a live remote endpoint starting with libsql:// or https://.`,
+      reason: `BLOCKED — REMOTE DATABASE IDENTITY NOT VERIFIED: Local database URL "${testUrl}" detected. Remote Turso verification requires a live remote endpoint starting with libsql:// or https://.`,
     };
   }
 
@@ -98,7 +98,7 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
     return {
       valid: false,
       blocked: true,
-      reason: `Invalid database protocol in "${testUrl}". Remote Turso URLs must start with libsql:// or https://.`,
+      reason: `BLOCKED — REMOTE DATABASE IDENTITY NOT VERIFIED: Invalid database protocol in "${testUrl}". Remote Turso URLs must start with libsql:// or https://.`,
     };
   }
 
@@ -106,7 +106,7 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
     return {
       valid: false,
       blocked: true,
-      reason: 'Dedicated TURSO_TEST_AUTH_TOKEN is required for remote Turso test access.',
+      reason: 'BLOCKED — REMOTE DATABASE IDENTITY NOT VERIFIED: Dedicated TURSO_TEST_AUTH_TOKEN is required for remote Turso test access.',
     };
   }
 
@@ -154,7 +154,24 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
 
   const { host, dbId } = parsedIdentity;
 
-  // Build configured allowlist
+  if (!dbId || dbId.trim() === '') {
+    return {
+      valid: false,
+      blocked: false,
+      reason: `UNVERIFIABLE DATABASE TARGET: Database identity is empty or missing in "${testUrl}".`,
+    };
+  }
+
+  // If explicit TURSO_TEST_DATABASE_ID is provided in env, it must not be empty or whitespace
+  if (env.TURSO_TEST_DATABASE_ID !== undefined && explicitTestDbId === '') {
+    return {
+      valid: false,
+      blocked: false,
+      reason: 'DATABASE IDENTITY INVALID: TURSO_TEST_DATABASE_ID was provided but is empty or missing.',
+    };
+  }
+
+  // Build configured allowlist: strict Exact Match against canonical identifiers
   const envAllowlist = (env.TURSO_TEST_DATABASE_ALLOWLIST || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
@@ -165,31 +182,37 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
     ...envAllowlist,
   ]);
 
-  // If explicit TURSO_TEST_DATABASE_ID is provided, verify it matches the database URL host/identity
-  if (explicitTestDbId) {
-    const matchesIdentity = dbId === explicitTestDbId || host.startsWith(explicitTestDbId) || dbId.startsWith(explicitTestDbId);
-    if (!matchesIdentity) {
-      return {
-        valid: false,
-        blocked: false,
-        reason: `DATABASE IDENTITY MISMATCH: Configured TURSO_TEST_DATABASE_ID "${explicitTestDbId}" does not match target database identity "${dbId}" (${host}).`,
-      };
-    }
-  }
+  // Exact Match against canonical allowlist: strictly NO startsWith, NO prefix matching, NO suffix matching, NO wildcard
+  const isExactAllowlisted = fullAllowlist.has(dbId);
 
-  // Check allowlist: either dbId or host must be explicitly in the allowlist
-  const isAllowlisted =
-    fullAllowlist.has(dbId) ||
-    fullAllowlist.has(host) ||
-    Array.from(fullAllowlist).some((allowed) => dbId === allowed || dbId.startsWith(`${allowed}-`) || host.startsWith(`${allowed}.`));
-
-  if (!isAllowlisted) {
+  if (!isExactAllowlisted) {
     const bypassNote = attemptedBypass ? ' Security bypass attempt rejected; allowlist enforcement cannot be overridden.' : '';
     return {
       valid: false,
       blocked: false,
-      reason: `UNAUTHORIZED DATABASE TARGET: Database identity "${dbId}" (${host}) is not in the approved test database allowlist. URL substrings (e.g. "test", "disposable") alone do not prove database identity.${bypassNote}`,
+      reason: `UNAUTHORIZED DATABASE TARGET: Database identity "${dbId}" (${host}) is not in the approved test database allowlist. Exact match against approved test database identifiers is strictly required; prefix, suffix, or substring matching is rejected.${bypassNote}`,
     };
+  }
+
+  // Hostname validation: hostname's primary subdomain must exact match dbId
+  const hostSubdomain = host.split('.')[0];
+  if (hostSubdomain !== dbId) {
+    return {
+      valid: false,
+      blocked: false,
+      reason: `DATABASE HOSTNAME MISMATCH: Hostname "${host}" does not match database identity "${dbId}".`,
+    };
+  }
+
+  // If explicit TURSO_TEST_DATABASE_ID is provided, verify it strictly exact-matches dbId (no prefix, no suffix)
+  if (explicitTestDbId) {
+    if (explicitTestDbId !== dbId) {
+      return {
+        valid: false,
+        blocked: false,
+        reason: `DATABASE IDENTITY MISMATCH: Configured TURSO_TEST_DATABASE_ID "${explicitTestDbId}" does not match target database identity "${dbId}" (${host}). Hostname and database ID must match exactly.`,
+      };
+    }
   }
 
   return {

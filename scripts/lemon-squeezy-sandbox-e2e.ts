@@ -61,6 +61,9 @@ export interface SandboxReport {
   provider_api_status: 'PASS' | 'BLOCKED' | 'FAIL' | 'NOT_RUN';
   checkout_creation_status: 'PASS' | 'BLOCKED' | 'FAIL' | 'NOT_RUN';
   provider_originated_webhook_verified: boolean;
+  provider_event_id: string | null;
+  transaction_reference: string | null;
+  provenance: string;
   payment_status: string;
   refund_status: string;
   started_at: string;
@@ -242,6 +245,8 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
   const providerRequestIds: string[] = [];
   let totalAssertionsPassed = 0;
   let totalAssertionsFailed = 0;
+  let checkoutId = '';
+  let checkoutUrl = '';
 
   const isSimulateArg = Boolean(
     process.argv.includes('--simulate') ||
@@ -300,7 +305,8 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
       dbTarget,
       providerRequestIds,
       testType,
-      options.outputPath
+      options.outputPath,
+      checkoutId
     );
   }
 
@@ -407,8 +413,8 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
 
     // Step 4: Real Lemon Squeezy Sandbox Checkout Creation
     const t3 = Date.now();
-    let checkoutId = '';
-    let checkoutUrl = '';
+    checkoutId = '';
+    checkoutUrl = '';
     try {
       const checkoutReqPayload = {
         data: {
@@ -495,33 +501,31 @@ export async function executeSandboxE2E(options: RunnerOptions = {}): Promise<Sa
 
     // Phase C: If in GENUINE_PROVIDER_E2E mode, verify real provider webhook delivery
     if (testType === 'GENUINE_PROVIDER_E2E') {
-      const webhookUrl = (env.LEMON_SQUEEZY_WEBHOOK_URL || env.APP_URL || '').trim();
-      const hasPublicHttps = webhookUrl.startsWith('https://') && !webhookUrl.includes('localhost') && !webhookUrl.includes('127.0.0.1');
-      const providerWebhookDelivered = env.LEMON_SQUEEZY_PROVIDER_WEBHOOK_DELIVERED === 'true';
+      // In Genuine Provider E2E mode, synthetic payloads and local HMAC signatures are strictly prohibited.
+      // A boolean environment variable (e.g. LEMON_SQUEEZY_PROVIDER_WEBHOOK_DELIVERED) cannot serve as evidence.
+      // We strictly require an active public HTTPS webhook receiver and genuine provider-originated delivery.
+      const blockedMsg =
+        `BLOCKED — GENUINE PROVIDER WEBHOOK NOT VERIFIED: Fix Package Checkout created successfully via Lemon Squeezy Sandbox API ` +
+        `(Checkout ID: ${checkoutId}, Checkout URL: ${checkoutUrl}). ` +
+        `However, Genuine Provider E2E requires an active Lemon Squeezy Sandbox environment with a public HTTPS ` +
+        `webhook receiver and a genuine provider-originated event delivered from Lemon Squeezy servers. ` +
+        `Locally signed synthetic webhooks are strictly segregated under LOCAL_SIMULATION mode (--simulate) ` +
+        `and cannot be used as proof of Genuine Provider E2E verification. ` +
+        `GENUINE PROVIDER E2E BLOCKED: Awaiting actual provider event delivery.`;
 
-      if (!hasPublicHttps || !providerWebhookDelivered) {
-        const blockedMsg =
-          `GENUINE PROVIDER E2E BLOCKED: Fix Package Checkout created successfully via Lemon Squeezy Sandbox API ` +
-          `(Checkout ID: ${checkoutId}, Checkout URL: ${checkoutUrl}). ` +
-          `However, Genuine Provider E2E requires an active Lemon Squeezy Sandbox environment with a public HTTPS ` +
-          `webhook receiver (LEMON_SQUEEZY_WEBHOOK_URL) and an interactive payment transaction by a tester on the checkout URL. ` +
-          `Locally signed synthetic webhooks are strictly segregated under LOCAL_SIMULATION mode (--simulate) ` +
-          `and cannot be used as proof of Genuine Provider E2E verification.`;
+      recordStep(
+        6,
+        'Provider-Originated Webhook & Paid Transaction Verification',
+        'HTTP_WEBHOOK',
+        'NOT_VERIFIED',
+        'BLOCKED',
+        0,
+        blockedMsg,
+        0,
+        0
+      );
 
-        recordStep(
-          6,
-          'Provider-Originated Webhook & Paid Transaction Verification',
-          'HTTP_WEBHOOK',
-          'NOT_VERIFIED',
-          'BLOCKED',
-          0,
-          blockedMsg,
-          0,
-          0
-        );
-
-        return makeReport('BLOCKED', null, blockedMsg);
-      }
+      return makeReport('BLOCKED', null, blockedMsg);
     }
 
     // Step 6: HTTP Integration — Submit order_created Event via HTTP
@@ -959,7 +963,8 @@ function buildReport(
   dbTarget: string,
   reqIds: string[],
   testType: 'GENUINE_PROVIDER_E2E' | 'LOCAL_SIMULATION',
-  outputPath?: string
+  outputPath?: string,
+  checkoutId?: string
 ): SandboxReport {
   const completedAt = new Date().toISOString();
   const stepStatus: Record<string, 'PASS' | 'BLOCKED' | 'FAIL' | 'NOT_RUN'> = {};
@@ -1011,6 +1016,19 @@ function buildReport(
     ? 'BLOCKED'
     : 'NOT_VERIFIED';
 
+  const transactionRef = testType === 'GENUINE_PROVIDER_E2E' && checkoutId ? checkoutId : null;
+  const providerEventId = providerOriginatedVerified
+    ? (steps.find((s) => s.evidence_source === 'PROVIDER_ORIGINATED')?.provider_request_id || null)
+    : null;
+
+  const provenance = overallStatus === 'BLOCKED'
+    ? (blockedReason?.includes('GENUINE PROVIDER WEBHOOK NOT VERIFIED')
+        ? 'BLOCKED — GENUINE PROVIDER WEBHOOK NOT VERIFIED'
+        : 'BLOCKED — CONFIGURATION OR CREDENTIALS MISSING')
+    : (testType === 'LOCAL_SIMULATION'
+        ? 'LOCAL_SIMULATION_ONLY'
+        : 'VERIFIED_PROVIDER_EVIDENCE');
+
   const evidenceSummary = {
     provider_originated_events_verified: providerOriginatedVerified,
     locally_simulated_events_count: locallySimulatedCount,
@@ -1032,6 +1050,9 @@ function buildReport(
     provider_api_status: providerApiStatus,
     checkout_creation_status: checkoutCreationStatus,
     provider_originated_webhook_verified: providerOriginatedVerified,
+    provider_event_id: providerEventId,
+    transaction_reference: transactionRef,
+    provenance,
     payment_status: paymentStatus,
     refund_status: refundStatus,
     started_at: startedAt,
