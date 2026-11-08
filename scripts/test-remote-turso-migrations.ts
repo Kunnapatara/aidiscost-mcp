@@ -45,7 +45,18 @@ export function extractDatabaseIdentity(rawUrl: string): { host: string; dbId: s
   try {
     const parsed = new URL(rawUrl);
     const host = parsed.hostname.toLowerCase();
-    if (!host) return null;
+    if (!host || host.trim() === '') return null;
+
+    // For official Turso domain: extract database subdomain
+    if (host.endsWith('.turso.io') && host !== '.turso.io' && !host.endsWith('..turso.io')) {
+      const subdomain = host.slice(0, -'.turso.io'.length);
+      if (!subdomain || subdomain.includes('.') || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(subdomain)) {
+        return null;
+      }
+      return { host, dbId: subdomain };
+    }
+
+    // For other hosts, extract first DNS label for identity evaluation
     const firstSubdomain = host.split('.')[0];
     if (!firstSubdomain || firstSubdomain.trim() === '') return null;
     return { host, dbId: firstSubdomain };
@@ -94,11 +105,34 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
     };
   }
 
-  if (!testUrl.startsWith('libsql://') && !testUrl.startsWith('https://')) {
+  // Parse URL syntax
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(testUrl);
+  } catch {
     return {
       valid: false,
-      blocked: true,
-      reason: `BLOCKED — REMOTE DATABASE IDENTITY NOT VERIFIED: Invalid database protocol in "${testUrl}". Remote Turso URLs must start with libsql:// or https://.`,
+      blocked: false,
+      reason: `UNVERIFIABLE DATABASE TARGET: Invalid URL syntax in "${testUrl}".`,
+    };
+  }
+
+  // Protocol validation: Remote Turso endpoints strictly require secure protocols ("libsql://" or "https://")
+  const protocol = parsedUrl.protocol.toLowerCase();
+  if (protocol !== 'libsql:' && protocol !== 'https:') {
+    return {
+      valid: false,
+      blocked: false,
+      reason: `INVALID DATABASE PROTOCOL: Remote Turso requires secure protocol ("libsql://" or "https://"). Insecure or unsupported protocol "${parsedUrl.protocol}" is strictly prohibited.`,
+    };
+  }
+
+  // Port validation: Remote Turso endpoints must use standard TLS port (443 or default); custom ports rejected
+  if (parsedUrl.port && parsedUrl.port !== '443') {
+    return {
+      valid: false,
+      blocked: false,
+      reason: `UNEXPECTED PORT: Remote Turso endpoints must use standard TLS port (443 or default). Custom port "${parsedUrl.port}" is not supported.`,
     };
   }
 
@@ -120,7 +154,6 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
   }
 
   // Override Protection: Verify no environment variable attempts to bypass security checks
-  // No environment variable is permitted to turn an unallowlisted database into a safe test database
   const attemptedBypass =
     env.TURSO_ALLOW_TEST_MIGRATIONS === 'true' ||
     env.ALLOW_UNVERIFIED_DATABASE === 'true' ||
@@ -142,17 +175,52 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
     };
   }
 
-  // A1: Database Identity Verification
-  const parsedIdentity = extractDatabaseIdentity(testUrl);
-  if (!parsedIdentity) {
+  // Complete Hostname Validation
+  const host = parsedUrl.hostname.toLowerCase();
+  if (!host || host.trim() === '') {
     return {
       valid: false,
       blocked: false,
-      reason: `UNVERIFIABLE DATABASE TARGET: Could not extract hostname or database identity from "${testUrl}".`,
+      reason: 'UNVERIFIABLE DATABASE TARGET: Hostname is empty or missing.',
     };
   }
 
-  const { host, dbId } = parsedIdentity;
+  // Custom exact-host allowlist for self-hosted or enterprise test nodes
+  const customHostAllowlist = new Set<string>(
+    (env.TURSO_TEST_CUSTOM_HOST_ALLOWLIST || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  const isCustomHost = customHostAllowlist.has(host);
+  const isOfficialTursoDomain = host.endsWith('.turso.io') && host !== '.turso.io' && !host.endsWith('..turso.io');
+
+  if (!isOfficialTursoDomain && !isCustomHost) {
+    return {
+      valid: false,
+      blocked: false,
+      reason: `UNTRUSTED DOMAIN: Hostname "${host}" does not belong to the official Turso domain (".turso.io"). Untrusted domains or arbitrary custom domains are strictly rejected.`,
+    };
+  }
+
+  // Format validation and database identity extraction
+  let dbId = '';
+  if (isOfficialTursoDomain) {
+    const subdomain = host.slice(0, -'.turso.io'.length);
+    // Must be a valid single DNS label (alphanumeric and hyphens, no internal dots)
+    if (!subdomain || subdomain.includes('.') || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(subdomain)) {
+      return {
+        valid: false,
+        blocked: false,
+        reason: `MALFORMED TURSO HOSTNAME: Hostname "${host}" is not a valid Turso database endpoint. Must match "<database_id>.turso.io".`,
+      };
+    }
+    dbId = subdomain;
+  } else {
+    // For explicitly allowlisted custom hosts, use the primary subdomain label
+    dbId = host.split('.')[0];
+  }
 
   if (!dbId || dbId.trim() === '') {
     return {
@@ -171,7 +239,7 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
     };
   }
 
-  // Build configured allowlist: strict Exact Match against canonical identifiers
+  // Build configured database allowlist: strict Exact Match against canonical identifiers
   const envAllowlist = (env.TURSO_TEST_DATABASE_ALLOWLIST || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
@@ -191,16 +259,6 @@ export function validateTursoTestConfig(env: NodeJS.ProcessEnv = process.env): T
       valid: false,
       blocked: false,
       reason: `UNAUTHORIZED DATABASE TARGET: Database identity "${dbId}" (${host}) is not in the approved test database allowlist. Exact match against approved test database identifiers is strictly required; prefix, suffix, or substring matching is rejected.${bypassNote}`,
-    };
-  }
-
-  // Hostname validation: hostname's primary subdomain must exact match dbId
-  const hostSubdomain = host.split('.')[0];
-  if (hostSubdomain !== dbId) {
-    return {
-      valid: false,
-      blocked: false,
-      reason: `DATABASE HOSTNAME MISMATCH: Hostname "${host}" does not match database identity "${dbId}".`,
     };
   }
 

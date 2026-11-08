@@ -269,5 +269,101 @@ describe('AIDisCost MCP — Area 6 Remote Turso Migration Guard & Safety Tests',
     const resNoSubdomain = await runRemoteTursoMigrationTest(envNoSubdomain);
     assert.strictEqual(resNoSubdomain.status, 'FAIL');
   });
+
+  test('16. Allowed first DNS label on an untrusted domain is strictly rejected with FAIL', async () => {
+    // aidiscost-test-disposable is an approved database ID, but attacker.example is an untrusted domain
+    const envUntrusted: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'https://aidiscost-test-disposable.attacker.example',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const valUntrusted = validateTursoTestConfig(envUntrusted);
+    assert.strictEqual(valUntrusted.valid, false, 'Untrusted domain must fail even with allowed first label');
+    assert.ok(valUntrusted.reason?.includes('UNTRUSTED DOMAIN'));
+
+    const resUntrusted = await runRemoteTursoMigrationTest(envUntrusted);
+    assert.strictEqual(resUntrusted.status, 'FAIL');
+  });
+
+  test('17. Insecure HTTP protocol is strictly rejected with FAIL', async () => {
+    const envHttp: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'http://aidiscost-disposable-test-db.turso.io',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const valHttp = validateTursoTestConfig(envHttp);
+    assert.strictEqual(valHttp.valid, false, 'Insecure http:// must fail');
+    assert.ok(valHttp.reason?.includes('INVALID DATABASE PROTOCOL'));
+
+    const resHttp = await runRemoteTursoMigrationTest(envHttp);
+    assert.strictEqual(resHttp.status, 'FAIL');
+  });
+
+  test('18. Unexpected custom port is strictly rejected with FAIL', async () => {
+    const envPort: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'libsql://aidiscost-disposable-test-db.turso.io:8080',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const valPort = validateTursoTestConfig(envPort);
+    assert.strictEqual(valPort.valid, false, 'Unexpected non-standard port must fail');
+    assert.ok(valPort.reason?.includes('UNEXPECTED PORT'));
+
+    const resPort = await runRemoteTursoMigrationTest(envPort);
+    assert.strictEqual(resPort.status, 'FAIL');
+  });
+
+  test('19. Unexpected hostname suffix and lookalike domains are strictly rejected with FAIL', async () => {
+    // Suffix domain attempt
+    const envSuffixDomain: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'libsql://aidiscost-disposable-test-db.turso.io.attacker.com',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const valSuffixDomain = validateTursoTestConfig(envSuffixDomain);
+    assert.strictEqual(valSuffixDomain.valid, false);
+    assert.ok(valSuffixDomain.reason?.includes('UNTRUSTED DOMAIN'));
+
+    const resSuffixDomain = await runRemoteTursoMigrationTest(envSuffixDomain);
+    assert.strictEqual(resSuffixDomain.status, 'FAIL');
+
+    // Lookalike domain attempt (evil-turso.io)
+    const envLookalike: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'libsql://aidiscost-test-disposable.evil-turso.io',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+    };
+    const valLookalike = validateTursoTestConfig(envLookalike);
+    assert.strictEqual(valLookalike.valid, false);
+    assert.ok(valLookalike.reason?.includes('UNTRUSTED DOMAIN'));
+
+    const resLookalike = await runRemoteTursoMigrationTest(envLookalike);
+    assert.strictEqual(resLookalike.status, 'FAIL');
+  });
+
+  test('20. Custom-host allowlist via TURSO_TEST_CUSTOM_HOST_ALLOWLIST enables explicitly permitted custom hosts', async () => {
+    // Case A: Without TURSO_TEST_CUSTOM_HOST_ALLOWLIST, custom domain is rejected
+    const envWithoutAllowlist: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'libsql://my-custom-test-node.internal.example',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+      TURSO_TEST_DATABASE_ALLOWLIST: 'my-custom-test-node',
+    };
+    const valWithout = validateTursoTestConfig(envWithoutAllowlist);
+    assert.strictEqual(valWithout.valid, false, 'Custom domain must fail without host allowlist');
+    assert.ok(valWithout.reason?.includes('UNTRUSTED DOMAIN'));
+
+    // Case B: With TURSO_TEST_CUSTOM_HOST_ALLOWLIST, custom domain is permitted
+    const envWithAllowlist: NodeJS.ProcessEnv = {
+      NODE_ENV: 'test',
+      TURSO_TEST_DATABASE_URL: 'libsql://my-custom-test-node.internal.example',
+      TURSO_TEST_AUTH_TOKEN: 'token_123',
+      TURSO_TEST_DATABASE_ALLOWLIST: 'my-custom-test-node',
+      TURSO_TEST_CUSTOM_HOST_ALLOWLIST: 'my-custom-test-node.internal.example,other-node.internal.example',
+    };
+    const valWith = validateTursoTestConfig(envWithAllowlist);
+    assert.strictEqual(valWith.valid, true, 'Custom domain must pass with exact host allowlist');
+    assert.strictEqual(valWith.url, 'libsql://my-custom-test-node.internal.example');
+  });
 });
 

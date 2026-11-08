@@ -1,10 +1,10 @@
 {
   "overall_status": "BLOCKED",
-  "run_id": "sb_run_d6bcc220-e8c7-4b82-8bd8-76a25b9ece29",
-  "commit_sha": "41a3436a428f6357643ac9540cfed1980bf62741",
-  "commit_provenance_verified": true,
+  "run_id": "sb_run_b9dcc76d-dd73-44ee-8d03-1ec12c7c54aa",
+  "commit_sha": "UNKNOWN",
+  "commit_provenance_verified": false,
   "branch": "main",
-  "execution_timestamp": "2026-11-06T13:43:31.001Z",
+  "execution_timestamp": "2026-11-08T02:54:29.699Z",
   "environment": "development",
   "sandbox_mode": false,
   "test_type": "GENUINE_PROVIDER_E2E",
@@ -17,8 +17,8 @@
   "provenance": "BLOCKED — CONFIGURATION OR CREDENTIALS MISSING",
   "payment_status": "BLOCKED",
   "refund_status": "BLOCKED",
-  "started_at": "2026-11-06T13:43:31.001Z",
-  "completed_at": "2026-11-06T13:43:31.002Z",
+  "started_at": "2026-11-08T02:54:29.699Z",
+  "completed_at": "2026-11-08T02:54:29.710Z",
   "steps": [
     {
       "step_number": 1,
